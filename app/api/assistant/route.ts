@@ -12,6 +12,12 @@ import { isSameOrigin } from '@/lib/same-origin';
 import { CHAT_USER_BURST, CHAT_USER_DAILY, reserveProviderCalls } from '@/lib/llm-budget';
 import { checkRateLimit, rateLimitedResponse } from '@/lib/rate-limit';
 import { logEvent } from '@/lib/audit-log';
+import {
+  BLOCKED_REQUEST_MESSAGE,
+  REINFORCEMENT,
+  assessUserMessage,
+  stripInvisible,
+} from '@/lib/prompt-safety';
 
 export const dynamic = 'force-dynamic';
 
@@ -73,16 +79,35 @@ export async function POST(request: Request) {
     return fail('bad_request', validated.error, 400);
   }
 
+  // Invisible characters never reach the model, and the last turn is
+  // screened for jailbreak patterns before a provider call is made.
+  const messages = validated.messages.map((m) => ({ ...m, content: stripInvisible(m.content) }));
+  const safety = assessUserMessage(messages[messages.length - 1]?.content ?? '');
+  if (safety.verdict === 'block') {
+    await logEvent(
+      'assistant',
+      'assistant.prompt_safety.block',
+      `user=${viewer.login} id=${viewer.id} score=${safety.score} categories=${safety.categories.join(',')}`,
+    );
+    const strikes = await checkRateLimit(`rl:assistant:jailbreak:${viewer.id}`, 5, 15 * 60);
+    if (!strikes.allowed) {
+      return rateLimitedResponse(strikes.retryAfter, 'Too many blocked requests. Try again later.');
+    }
+    return fail('blocked_request', BLOCKED_REQUEST_MESSAGE, 400);
+  }
+
   const token = await getViewerToken();
   const contextBlock = await buildContextBlock({ username: viewer.login, token });
-  const system = buildSystemPrompt(contextBlock);
+  const system =
+    buildSystemPrompt(contextBlock) + (safety.verdict === 'harden' ? `\n\n${REINFORCEMENT}` : '');
 
   try {
-    const stream = await streamCompletion(system, validated.messages);
+    const stream = await streamCompletion(system, messages);
     await logEvent(
       'assistant',
       'assistant.request',
-      `user=${viewer.login} id=${viewer.id} turns=${validated.messages.length}`,
+      `user=${viewer.login} id=${viewer.id} turns=${messages.length}` +
+        (safety.categories.length ? ` risk=${safety.verdict}:${safety.categories.join(',')}` : ''),
     );
     return stream;
   } catch (error) {

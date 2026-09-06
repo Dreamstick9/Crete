@@ -45,6 +45,12 @@ import {
 } from '@/lib/agent-memory';
 import { normalizeRepoName } from '@/lib/deepwiki';
 import { SSE_KEEPALIVE, encodeAgentEvent, type AgentEvent } from '@/lib/agent-events';
+import {
+  BLOCKED_REQUEST_MESSAGE,
+  REINFORCEMENT,
+  assessUserMessage,
+  stripInvisible,
+} from '@/lib/prompt-safety';
 
 export const dynamic = 'force-dynamic';
 
@@ -252,7 +258,30 @@ export async function POST(request: Request) {
   // conversation. An absent or unknown id simply starts a new chat.
   const requestedId = (body as { sessionId?: unknown } | null)?.sessionId;
   const latest = validated.messages[validated.messages.length - 1];
-  const userText = latest?.role === 'user' ? latest.content : '';
+  // Invisible characters are stripped before the text reaches the model, is
+  // stored, or is scored: a payload the detector cannot see is one the model
+  // should not receive either.
+  const userText = latest?.role === 'user' ? stripInvisible(latest.content) : '';
+
+  // Input-side jailbreak screen. This runs before any provider call, so a
+  // refused turn costs nothing; the reservation taken above is handed back.
+  const safety = assessUserMessage(userText);
+  if (safety.verdict === 'block') {
+    await refundProviderCalls(MAX_ITERATIONS);
+    await logEvent(
+      'agent',
+      'agent.prompt_safety.block',
+      `user=${viewer.login} id=${viewer.id} score=${safety.score} categories=${safety.categories.join(',')}`,
+    );
+    // Repeat offenders get a cooldown. One curious probe is not abuse; a
+    // stream of them is someone working through a jailbreak list, and each
+    // attempt still costs us a session lookup and a KV write.
+    const strikes = await checkRateLimit(`rl:agent:jailbreak:${viewer.id}`, 5, 15 * 60);
+    if (!strikes.allowed) {
+      return rateLimitedResponse(strikes.retryAfter, 'Too many blocked requests. Try again later.');
+    }
+    return fail('blocked_request', BLOCKED_REQUEST_MESSAGE, 400);
+  }
 
   let chat: AgentSession | null = null;
   if (isValidSessionId(requestedId)) {
@@ -277,9 +306,14 @@ export async function POST(request: Request) {
   // untrusted envelope is not optional.
   const standing = await getStanding(viewer.login);
   const memoryText = describeMemory(chat);
-  const extraContext = wrapRetrievedData(
-    [describeStanding(standing), memoryText].filter(Boolean).join('\n'),
-  );
+  const extraContext = [
+    wrapRetrievedData([describeStanding(standing), memoryText].filter(Boolean).join('\n')),
+    // Restated immediately before the student's turn, where it is far more
+    // effective than the same rule stated once at the top of the prompt.
+    safety.verdict === 'harden' ? REINFORCEMENT : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 
   // The transcript the model sees is the server's, not the client's. A client
   // that replays an edited history can no longer put words in its own mouth.
@@ -340,7 +374,8 @@ export async function POST(request: Request) {
       'agent.request',
       `user=${viewer.login} id=${viewer.id} engine=${engine} ` +
         `turns=${conversation.length} iterations=${result.iterations} tools=${result.toolsUsed.join(',') || 'none'} ` +
-        `session=${isNewSession ? 'new' : 'resumed'} saved=${saved} ms=${Date.now() - startedAt}${usage}`,
+        `session=${isNewSession ? 'new' : 'resumed'} saved=${saved} ms=${Date.now() - startedAt}${usage}` +
+        (safety.categories.length ? ` risk=${safety.verdict}:${safety.categories.join(',')}` : ''),
     );
     return {
       reply,
