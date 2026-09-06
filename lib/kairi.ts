@@ -25,6 +25,14 @@ export const KAIRI_PATH = '/kairi';
  */
 export const KAIRI_MODEL_ID = 'meardlabs/kairi-v1';
 
+/** Who students should understand the assistant to be made by. */
+export const KAIRI_VENDOR = 'Meard Labs';
+/** Released version, as students see it. */
+export const KAIRI_VERSION = 'v1';
+/** How the assistant names itself when asked. */
+export const KAIRI_SELF_NAME = `Kairi ${KAIRI_VERSION}`;
+
+
 export const KAIRI_TAGLINE = 'Your open-source guide. Ask anything — no question is too basic.';
 
 /**

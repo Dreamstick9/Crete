@@ -36,6 +36,7 @@ import { assessToolResult } from './prompt-safety';
 import { logEvent } from './audit-log';
 import { TOOLS, guestAllowedTools, toolSchemasForModel, type AgentContext, type ToolDef } from './agent-tools';
 import { toolLabel, type AgentEvent } from './agent-events';
+import { KAIRI_IDENTITY_RULES } from './kairi-prompt';
 
 export const MAX_ITERATIONS = 4;
 export const MAX_TOOL_CALLS = 8;
@@ -120,6 +121,7 @@ export function guardReply(reply: string): string {
  */
 const AGENT_SYSTEM_PROMPT = [
   'You are Kairi, the open-source mentor built into the NST Open-Source Tracker. You help students make real open-source contributions and understand this leaderboard site.',
+  ...KAIRI_IDENTITY_RULES,
   'You are read-only. Your tools are data sources only — you cannot approve, flag, queue, write to GitHub, or change anything. Never claim otherwise.',
   '',
   'HOW TO WORK',
