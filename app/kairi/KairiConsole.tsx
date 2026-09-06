@@ -584,7 +584,9 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
 
   return (
     <div className="flex min-h-[calc(100dvh-4rem)] w-full">
-      <div className="hidden md:block">{sidebar}</div>
+      {/* Pinned beside the conversation with its own scrollbar, so twenty
+          saved chats cannot make the page taller than the answer. */}
+      <div className="sticky top-16 hidden h-[calc(100dvh-4rem)] md:block">{sidebar}</div>
 
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 flex md:hidden">
