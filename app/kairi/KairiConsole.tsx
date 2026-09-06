@@ -587,7 +587,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
   const empty = exchanges.length === 0;
 
   const sidebar = (
-    <nav className="flex h-full w-64 shrink-0 flex-col border-r border-line bg-panel" aria-label="Your chats">
+    <nav className="flex h-full min-h-0 w-64 shrink-0 flex-col border-r border-line bg-panel" aria-label="Your chats">
       <div className="p-3">
         <button
           type="button"
@@ -597,7 +597,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
           + New chat
         </button>
       </div>
-      <div className="scroll-rail flex-1 overflow-y-auto overscroll-contain px-2 pb-3" data-lenis-prevent>
+      <div className="scroll-rail min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3" data-lenis-prevent>
         {chats.length === 0 ? (
           <p className="px-2 py-3 text-[12.5px] leading-relaxed text-ink-soft">
             Your chats show up here. Each one keeps its own memory for a week.
@@ -647,11 +647,11 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
         </div>
       )}
 
-      <main className="flex h-full min-w-0 flex-1 flex-col">
+      <main className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <div
           ref={scrollRef}
           tabIndex={-1}
-          className="scroll-page flex-1 overflow-y-auto overscroll-contain"
+          className="scroll-page min-h-0 flex-1 overflow-y-auto overscroll-contain"
           data-lenis-prevent
         >
           <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-5 sm:px-6 sm:pt-7">

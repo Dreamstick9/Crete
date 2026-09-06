@@ -486,43 +486,48 @@ html.lenis, html.lenis body {
  * nowhere — Tailwind v4 ships no scrollbar utilities and this project has no
  * plugin, so both were silently doing nothing.
  *
- * Two panes sit side by side on /kairi and they must not read as one
- * surface. The chat list is a secondary index and gets a hairline rail; the
+ * Two panes sit side by side on /kairi and they should not read as one
+ * surface: the chat list is a secondary index and gets a hairline, the
  * transcript is the reading surface and gets a heavier bar with a reserved
- * gutter, so text does not reflow the moment the bar appears. macOS hides
- * overlay scrollbars until you move, which is exactly why an always-present
- * bar is worth the pixels here: it is the only affordance saying "this box
- * scrolls on its own".
+ * gutter so text does not reflow when the bar appears.
  *
- * `scrollbar-color` covers Firefox; the ::-webkit rules cover Chrome, Edge
- * and Safari. Colours come from the theme variables, so both bars invert
- * with the dark theme like everything else.
+ * THE STANDARD PROPERTIES COME FIRST, AND ::-webkit-scrollbar IS ONLY A
+ * FALLBACK. Styling ::-webkit-scrollbar in Safari opts the element out of
+ * macOS overlay scrollbars and gives it a permanent legacy bar instead,
+ * which looks broken next to every other app on the system. `scrollbar-width`
+ * and `scrollbar-color` express the same intent while leaving the platform's
+ * own scrollbar behaviour intact, and are supported by Chrome 121+ and
+ * Safari 18.2+. The @supports guard means the webkit rules only reach the
+ * older engines that have no other way to be styled.
  */
 @utility scrollbar-none {
   scrollbar-width: none;
+
   &::-webkit-scrollbar {
     width: 0;
     height: 0;
   }
 }
 
-/* The chat list: a 6px hairline that firms up on hover. */
+/* The chat list and the assistant panel: a hairline. */
 @utility scroll-rail {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line-strong) transparent;
 
-  &::-webkit-scrollbar {
-    width: 6px;
-  }
-  &::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  &::-webkit-scrollbar-thumb {
-    background-color: var(--color-line-strong);
-    border-radius: 9999px;
-  }
-  &:hover::-webkit-scrollbar-thumb {
-    background-color: var(--color-line-heavy);
+  @supports not (scrollbar-width: thin) {
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    &::-webkit-scrollbar-thumb {
+      background-color: var(--color-line-strong);
+      border-radius: 9999px;
+    }
+    &:hover::-webkit-scrollbar-thumb {
+      background-color: var(--color-line-heavy);
+    }
   }
 }
 
@@ -531,41 +536,41 @@ html.lenis, html.lenis body {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line-strong) transparent;
 
-  &::-webkit-scrollbar {
-    width: 6px;
-  }
-  &::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  &::-webkit-scrollbar-thumb {
-    background-color: var(--color-line-strong);
-    border-radius: 9999px;
-  }
-  &:hover::-webkit-scrollbar-thumb {
-    background-color: var(--color-line-heavy);
+  @supports not (scrollbar-width: thin) {
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    &::-webkit-scrollbar-thumb {
+      background-color: var(--color-line-strong);
+      border-radius: 9999px;
+    }
   }
 }
 
-/* The transcript: a 12px bar, inset by a transparent border so the thumb
- * reads as 6px of ink with breathing room rather than a slab on the edge. */
+/* The transcript: the same mechanism, a heavier thumb and a stable gutter. */
 @utility scroll-page {
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
+  scrollbar-width: auto;
   scrollbar-color: var(--color-line-heavy) transparent;
 
-  &::-webkit-scrollbar {
-    width: 12px;
-  }
-  &::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  &::-webkit-scrollbar-thumb {
-    background-color: var(--color-line-heavy);
-    background-clip: content-box;
-    border: 3px solid transparent;
-    border-radius: 9999px;
-  }
-  &:hover::-webkit-scrollbar-thumb {
-    background-color: var(--color-ink-faint);
+  @supports not (scrollbar-width: auto) {
+    &::-webkit-scrollbar {
+      width: 12px;
+    }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    &::-webkit-scrollbar-thumb {
+      background-color: var(--color-line-heavy);
+      background-clip: content-box;
+      border: 3px solid transparent;
+      border-radius: 9999px;
+    }
+    &:hover::-webkit-scrollbar-thumb {
+      background-color: var(--color-ink-faint);
+    }
   }
 }
