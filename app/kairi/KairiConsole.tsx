@@ -261,23 +261,62 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
   const endRef = useRef<HTMLDivElement | null>(null);
   /** The transcript pane — the only thing on this page that scrolls. */
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** Suppresses re-issuing a glide while one is still animating. */
+  const glideUntilRef = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // Scroll follows the answer only while the reader is already near the
   // bottom; a student who scrolled up to re-read is not yanked back down.
   const followRef = useRef(true);
 
+  /**
+   * Auto-follow is driven by INTENT, not by position.
+   *
+   * A position-only rule ("stop following when far from the bottom") turns
+   * itself off during its own animation: a smooth scroll toward the bottom
+   * spends most of its life far from the bottom. So a gesture — wheel, touch,
+   * Page Up — is what disengages following, and arriving at the bottom by any
+   * means re-engages it.
+   */
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const onScroll = () => {
-      followRef.current = el.scrollHeight - el.clientHeight - el.scrollTop < 160;
+    const distanceToBottom = () => el.scrollHeight - el.clientHeight - el.scrollTop;
+    const onGesture = () => {
+      if (distanceToBottom() > 120) followRef.current = false;
     };
+    const onScroll = () => {
+      if (distanceToBottom() < 80) followRef.current = true;
+    };
+    el.addEventListener('wheel', onGesture, { passive: true });
+    el.addEventListener('touchmove', onGesture, { passive: true });
+    el.addEventListener('keydown', onGesture);
     el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    return () => {
+      el.removeEventListener('wheel', onGesture);
+      el.removeEventListener('touchmove', onGesture);
+      el.removeEventListener('keydown', onGesture);
+      el.removeEventListener('scroll', onScroll);
+    };
   }, []);
 
   useEffect(() => {
-    if (followRef.current) endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    const el = scrollRef.current;
+    if (!el || !followRef.current) return;
+    const distance = el.scrollHeight - el.clientHeight - el.scrollTop;
+    if (distance <= 1) return;
+    // A large gap means a new question was just added: glide to it once.
+    // The few pixels a streaming answer adds per token are pinned instantly,
+    // because re-issuing a smooth scroll on every token restarts the
+    // animation before it can finish — which is what made following feel
+    // like it was fighting the reader instead of following them.
+    if (distance > 360) {
+      if (Date.now() > glideUntilRef.current) {
+        glideUntilRef.current = Date.now() + 700;
+        el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      }
+      return;
+    }
+    el.scrollTop = el.scrollHeight;
   }, [exchanges]);
 
   // Abort any in-flight request if the student navigates away mid-answer.
@@ -344,6 +383,13 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
       setExchanges(restored);
       setSessionId(data?.id ?? id);
       followRef.current = true;
+      // Land on the most recent turn. Gliding there would animate past the
+      // whole conversation, which reads as the page running away from you.
+      glideUntilRef.current = Date.now() + 700;
+      requestAnimationFrame(() => {
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
     } catch {
       setError('Could not open that chat. Try again in a moment.');
     }
@@ -365,6 +411,8 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
     setSessionId(null);
     setError(null);
     setSidebarOpen(false);
+    followRef.current = true;
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
     inputRef.current?.focus();
   }
 
@@ -549,7 +597,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
           + New chat
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-2 pb-3">
+      <div className="flex-1 overflow-y-auto overscroll-contain px-2 pb-3" data-lenis-prevent>
         {chats.length === 0 ? (
           <p className="px-2 py-3 text-[12.5px] leading-relaxed text-ink-soft">
             Your chats show up here. Each one keeps its own memory for a week.
@@ -600,7 +648,12 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col">
-        <div ref={scrollRef} className="flex-1 overflow-y-auto overscroll-contain">
+        <div
+          ref={scrollRef}
+          tabIndex={-1}
+          className="flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+          data-lenis-prevent
+        >
           <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-5 sm:px-6 sm:pt-7">
         <header className="mb-6">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">

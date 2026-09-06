@@ -265,7 +265,7 @@ export function Nav() {
           {/* Backdrop */}
           <div className="absolute inset-0 bg-ink/30 backdrop-blur-sm" onClick={() => setOpen(false)} />
           {/* Panel */}
-          <div className="absolute top-[60px] left-0 right-0 bg-ground border-b border-line shadow-pop max-h-[calc(100vh-60px)] overflow-y-auto">
+          <div className="absolute top-[60px] left-0 right-0 bg-ground border-b border-line shadow-pop max-h-[calc(100vh-60px)] overflow-y-auto overscroll-contain" data-lenis-prevent>
             <div className="flex flex-col py-2 px-2">
               {LINKS.map(({ href, label }) => {
                 const active = href === '/' ? path === '/' : path === href || path.startsWith(href + '/');

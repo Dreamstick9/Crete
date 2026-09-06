@@ -67,10 +67,38 @@ export default function AssistantWidget() {
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  /** Whether the reader is parked at the bottom, so streaming may follow. */
+  const nearBottomRef = useRef(true);
 
+  // Follow the reply as it streams, but only while the reader is already at
+  // the bottom — scrolling up to re-read an earlier answer should not be
+  // undone by the next token.
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+    const el = listRef.current;
+    if (!el) return;
+    if (nearBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [messages, open]);
+
+  // A gesture away from the bottom stops the follow; returning resumes it.
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const distanceToBottom = () => el.scrollHeight - el.clientHeight - el.scrollTop;
+    const onGesture = () => {
+      if (distanceToBottom() > 90) nearBottomRef.current = false;
+    };
+    const onScroll = () => {
+      if (distanceToBottom() < 60) nearBottomRef.current = true;
+    };
+    el.addEventListener('wheel', onGesture, { passive: true });
+    el.addEventListener('touchmove', onGesture, { passive: true });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      el.removeEventListener('wheel', onGesture);
+      el.removeEventListener('touchmove', onGesture);
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, [open]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -181,7 +209,11 @@ export default function AssistantWidget() {
             <div className="text-[11px] text-ink-soft">Read-only help for open-source + this site</div>
           </div>
 
-          <div ref={listRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+          <div
+            ref={listRef}
+            className="flex-1 overflow-y-auto overscroll-contain px-4 py-3 space-y-3"
+            data-lenis-prevent
+          >
             {signedIn === false ? (
               <div className="space-y-2">
                 <p className="text-[12.5px] text-ink leading-relaxed">
