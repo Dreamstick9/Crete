@@ -259,18 +259,21 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
   const [memoryOff, setMemoryOff] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  /** The transcript pane — the only thing on this page that scrolls. */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // Scroll follows the answer only while the reader is already near the
   // bottom; a student who scrolled up to re-read is not yanked back down.
   const followRef = useRef(true);
 
   useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
     const onScroll = () => {
-      const gap = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
-      followRef.current = gap < 160;
+      followRef.current = el.scrollHeight - el.clientHeight - el.scrollTop < 160;
     };
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
   }, []);
 
   useEffect(() => {
@@ -583,10 +586,11 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
   );
 
   return (
-    <div className="flex min-h-[calc(100dvh-4rem)] w-full">
-      {/* Pinned beside the conversation with its own scrollbar, so twenty
-          saved chats cannot make the page taller than the answer. */}
-      <div className="sticky top-16 hidden h-[calc(100dvh-4rem)] md:block">{sidebar}</div>
+    // 61px = the nav's fixed 60px height plus its 1px bottom border. The
+    // page itself never scrolls: the transcript pane does, and the composer
+    // sits below it, permanently on screen at every window size.
+    <div className="flex h-[calc(100dvh-61px)] w-full overflow-hidden">
+      <div className="hidden h-full md:block">{sidebar}</div>
 
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 flex md:hidden">
@@ -595,7 +599,9 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
         </div>
       )}
 
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8">
+      <main className="flex h-full min-w-0 flex-1 flex-col">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto overscroll-contain">
+          <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-5 sm:px-6 sm:pt-7">
         <header className="mb-6">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <button
@@ -616,7 +622,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
         </header>
 
         {empty && (
-          <section className="mb-6 flex-1">
+          <section>
             <div className="grid gap-3 sm:grid-cols-3">
               {KAIRI_DOORS.map((door) => (
                 <button
@@ -674,7 +680,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
         )}
 
         {!empty && (
-          <section className="flex-1 space-y-10" aria-live="polite">
+          <section className="space-y-10" aria-live="polite">
             {exchanges.map((x) => (
               <AnswerCard key={x.id} exchange={x} onAskFollowUp={(q) => ask(q)} />
             ))}
@@ -682,20 +688,26 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
           </section>
         )}
 
+          </div>
+        </div>
+
+        {/* The composer. Outside the scroll pane on purpose: it cannot be
+            pushed below the fold and never floats over the article. */}
+        <div className="border-t border-line bg-ground">
+          <div className="mx-auto w-full max-w-3xl px-4 py-3 sm:px-6">
         {memoryOff && (
-          <p className="mt-4 rounded-lg border border-line bg-panel px-3 py-2 text-[12.5px] text-ink-soft">
+          <p className="mb-2 rounded-lg border border-line bg-panel px-3 py-2 text-[12.5px] text-ink-soft">
             Heads up: this chat isn’t being saved right now, so it won’t be here when you come back.
           </p>
         )}
 
         {error && (
-          <p role="alert" className="mt-4 rounded-lg border border-warning-200 bg-warning-0 px-3 py-2 text-[13px] text-ink">
+          <p role="alert" className="mb-2 rounded-lg border border-warning-200 bg-warning-0 px-3 py-2 text-[13px] text-ink">
             {error}
           </p>
         )}
 
         <form
-          className="sticky bottom-3 mt-6"
           onSubmit={(e) => {
             e.preventDefault();
             ask(input);
@@ -736,10 +748,12 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
               </button>
             )}
           </div>
-          <p className="mt-2 px-1 text-[11.5px] text-ink-soft">
+          <p className="mt-2 hidden px-1 text-[11.5px] text-ink-soft sm:block">
             {KAIRI_NAME} can be wrong · public data only · read-only, it can’t change anything · Shift+Enter for a new line
           </p>
         </form>
+          </div>
+        </div>
       </main>
     </div>
   );

@@ -120,7 +120,9 @@ export function Nav() {
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2.5 shrink-0 group">
             <LogoMark />
-            <span className="text-[15px] font-[650] tracking-[-0.01em] text-ink group-hover:text-brand-600 transition-colors whitespace-nowrap">
+            {/* Below 400px the wordmark plus the signed-in actions overflow
+                the viewport; the mark alone still identifies the site. */}
+            <span className="hidden min-[400px]:inline text-[15px] font-[650] tracking-[-0.01em] text-ink group-hover:text-brand-600 transition-colors whitespace-nowrap">
               Opensource Tracker
             </span>
             <span className="text-[10px] font-[650] text-brand-600 bg-brand-0 rounded-md px-1.5 py-0.5 tracking-[0.04em] hidden sm:inline">
