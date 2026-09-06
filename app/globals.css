@@ -364,3 +364,118 @@ html.lenis, html.lenis body {
     animation: none;
   }
 }
+
+/* ── Assistant widget motion (transform/opacity only; honors reduced motion) ── */
+
+/* Panel entrance from the launcher corner. Close is a plain unmount. */
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.95); }
+  to   { opacity: 1; transform: none; }
+}
+
+@utility panel-enter {
+  transform-origin: bottom right;
+  animation: panel-in 0.18s cubic-bezier(0, 0, 0.2, 1);
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+/* New chat bubbles rise in as they mount */
+@keyframes bubble-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@utility bubble-enter {
+  animation: bubble-in 0.15s ease-out;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+/* Tool-trail chips fade in under agent replies */
+@keyframes chip-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@utility chip-enter {
+  animation: chip-in 0.2s ease-out;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+/* Typing indicator — three bouncing dots, staggered via inline animation-delay */
+@keyframes dot-bounce {
+  0%, 60%, 100% { opacity: 0.4; transform: none; }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+@utility typing-dot {
+  animation: dot-bounce 0.9s ease-in-out infinite both;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* ── Kairi console ────────────────────────────────────────────── */
+
+/* Caret at the end of an answer while it is still being written */
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@utility kairi-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--color-brand-500);
+  animation: caret-blink 1s steps(2, start) infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+/* Spinner ring beside a tool that is still running */
+@keyframes kairi-spin {
+  to { transform: rotate(360deg); }
+}
+
+@utility kairi-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  border: 2px solid var(--color-line-heavy);
+  border-top-color: var(--color-brand-500);
+  animation: kairi-spin 0.8s linear infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+    border-top-color: var(--color-line-heavy);
+  }
+}
+
+/* Answer cards rise in as they mount */
+@keyframes article-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+@utility article-enter {
+  animation: article-in 0.22s ease-out;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
