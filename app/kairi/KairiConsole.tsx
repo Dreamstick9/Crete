@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { MarkdownLite } from '@/app/components/MarkdownLite';
 import { readAgentEvents, type AgentEvent } from '@/lib/agent-events';
@@ -52,6 +52,8 @@ interface Exchange {
   ms?: number;
   /** Set when the student pressed Stop mid-answer. */
   stopped?: boolean;
+  /** Loaded from the saved chat rather than answered just now. */
+  restored?: boolean;
 }
 
 interface Viewer {
@@ -131,18 +133,21 @@ function ActivityRail({ steps, status, pending }: { steps: Step[]; status?: stri
   );
 }
 
+/** Splits off a heading the answer opens with, to use as the article title. */
+function splitTitle(answer: string): { title: string | null; body: string } {
+  const trimmed = answer.trimStart();
+  const m = trimmed.match(/^#{1,4}\s+[^\n]*\n?/);
+  if (!m) return { title: null, body: answer };
+  const heading = firstHeading(parseMarkdown(m[0]));
+  return heading ? { title: heading, body: trimmed.slice(m[0].length) } : { title: null, body: answer };
+}
+
 function AnswerCard({ exchange, onAskFollowUp }: { exchange: Exchange; onAskFollowUp: (q: string) => void }) {
   const [copied, setCopied] = useState(false);
   // Only a heading the answer OPENS with becomes the article title. The house
   // style puts the direct answer first and headings after it, so the first
   // heading in the body is usually a section, not a title.
-  const { title, body } = useMemo(() => {
-    const trimmed = exchange.answer.trimStart();
-    const m = trimmed.match(/^#{1,4}\s+[^\n]*\n?/);
-    if (!m) return { title: null as string | null, body: exchange.answer };
-    const heading = firstHeading(parseMarkdown(m[0]));
-    return heading ? { title: heading, body: trimmed.slice(m[0].length) } : { title: null, body: exchange.answer };
-  }, [exchange.answer]);
+  const { title, body } = splitTitle(exchange.answer);
 
   const markdown = `# ${title ?? exchange.question}\n\n${body.trim()}\n`;
 
@@ -206,9 +211,11 @@ function AnswerCard({ exchange, onAskFollowUp }: { exchange: Exchange; onAskFoll
         {!exchange.pending && (
           <footer className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-line pt-4 text-[12.5px] text-ink-soft">
             <span className="min-w-0">
-              {trail.length > 0
-                ? `${trail.length} ${trail.length === 1 ? 'lookup' : 'lookups'}`
-                : 'Answered from what Kairi already knew'}
+              {exchange.restored
+                ? 'From this chat\u2019s history'
+                : trail.length > 0
+                  ? `${trail.length} ${trail.length === 1 ? 'lookup' : 'lookups'}`
+                  : 'Answered from what Kairi already knew'}
               {typeof exchange.ms === 'number' && ` · ${seconds(exchange.ms)}`}
             </span>
             <span className="ml-auto flex items-center gap-1">
@@ -328,6 +335,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
           pending: false,
           steps: [],
           toolsUsed: [],
+          restored: true,
         });
       }
       setExchanges(restored);

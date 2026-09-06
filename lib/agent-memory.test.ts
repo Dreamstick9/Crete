@@ -206,3 +206,33 @@ describe('describeMemory', () => {
     expect(text).toContain('wants a good first issue');
   });
 });
+
+
+describe('message bodies keep their Markdown structure', () => {
+  it('preserves newlines and tabs but strips other control characters', async () => {
+    const { appendExchange, newSession } = await import('./agent-memory');
+    const answer = 'Direct answer.\n\n## Steps\n\n1. one\n\n```bash\n\tnpm test\n```';
+    const s = appendExchange(newSession('q'), 'q\r\nline 2', answer + '');
+    expect(s.messages[0].content).toBe('q\nline 2');
+    expect(s.messages[1].content).toBe(answer);
+  });
+
+  it('stores an assistant answer longer than a student message', async () => {
+    const { appendExchange, newSession, MAX_MESSAGE_CHARS, MAX_ASSISTANT_MESSAGE_CHARS } = await import('./agent-memory');
+    const long = 'x'.repeat(MAX_ASSISTANT_MESSAGE_CHARS + 100);
+    const s = appendExchange(newSession('q'), long, long);
+    expect(s.messages[0].content).toHaveLength(MAX_MESSAGE_CHARS);
+    expect(s.messages[1].content).toHaveLength(MAX_ASSISTANT_MESSAGE_CHARS);
+  });
+
+  it('elides long past answers when building model history', async () => {
+    const { forHistory, HISTORY_ASSISTANT_CHARS } = await import('./agent-memory');
+    const short = { role: 'assistant' as const, content: 'short', at: 0 };
+    expect(forHistory(short)).toBe('short');
+    const long = { role: 'assistant' as const, content: 'y'.repeat(HISTORY_ASSISTANT_CHARS + 50), at: 0 };
+    expect(forHistory(long)).toContain('omitted from history');
+    expect(forHistory(long).length).toBeLessThan(HISTORY_ASSISTANT_CHARS + 60);
+    const user = { role: 'user' as const, content: 'z'.repeat(HISTORY_ASSISTANT_CHARS + 50), at: 0 };
+    expect(forHistory(user)).toBe(user.content);
+  });
+});

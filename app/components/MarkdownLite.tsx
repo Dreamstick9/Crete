@@ -44,7 +44,7 @@ function renderInline(nodes: Inline[], keyPrefix: string): ReactNode[] {
         return (
           <code
             key={key}
-            className="rounded-md border border-line bg-panel px-1.5 py-0.5 font-mono text-[0.88em] text-ink-strong"
+            className="rounded-md border border-line bg-panel px-1.5 py-0.5 font-mono text-[0.88em] text-ink-strong [overflow-wrap:anywhere]"
           >
             {node.value}
           </code>

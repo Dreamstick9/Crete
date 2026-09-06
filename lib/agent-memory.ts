@@ -38,6 +38,20 @@ export const MAX_TRANSCRIPT_MESSAGES = 12;
 export const MAX_SESSIONS_PER_USER = 20;
 
 export const MAX_MESSAGE_CHARS = 2000;
+/**
+ * Assistant turns are stored longer than student turns: a structured answer
+ * with headings, a code block, sources and a next step is 2,000-5,000
+ * characters, and truncating it at 2,000 meant every reopened chat showed
+ * answers cut off mid-sentence. The cost is storage only; what is sent
+ * back to the model as history is capped separately (HISTORY_ASSISTANT_CHARS).
+ */
+export const MAX_ASSISTANT_MESSAGE_CHARS = 6000;
+/**
+ * How much of a past answer the model sees on later turns. History is
+ * re-sent on every provider call, so this is a token budget: enough to
+ * remember what was said, not enough to replay every code block.
+ */
+export const HISTORY_ASSISTANT_CHARS = 1500;
 const MAX_TITLE_CHARS = 60;
 
 /** Durable notes the agent keeps about a session — the "what are we working
@@ -105,6 +119,34 @@ function clean(text: unknown, limit: number): string {
 }
 
 /**
+ * Like `clean`, but keeps newlines and tabs: message bodies are Markdown,
+ * and a newline is structure, not noise. Stripping it (as `clean` once did
+ * for messages too) turned every reopened answer into one run-on paragraph
+ * with its tables and code blocks flattened into it.
+ */
+function cleanBody(text: unknown, limit: number): string {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim()
+    .slice(0, limit);
+}
+
+function messageLimit(role: 'user' | 'assistant'): number {
+  return role === 'assistant' ? MAX_ASSISTANT_MESSAGE_CHARS : MAX_MESSAGE_CHARS;
+}
+
+/**
+ * A past answer as the model should see it on later turns: the opening,
+ * which carries the conclusion, and a marker that the rest was elided.
+ */
+export function forHistory(message: MemoryMessage): string {
+  if (message.role !== 'assistant' || message.content.length <= HISTORY_ASSISTANT_CHARS) return message.content;
+  return `${message.content.slice(0, HISTORY_ASSISTANT_CHARS)}\n[... rest of the answer omitted from history]`;
+}
+
+/**
  * A readable name for a chat, derived from its opening question, so the
  * student's sidebar is not a list of UUIDs.
  */
@@ -123,11 +165,14 @@ function parseSession(raw: unknown, id: string): AgentSession | null {
   const messages = Array.isArray(r.messages)
     ? r.messages
         .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
-        .map((m) => ({
-          role: m.role === 'assistant' ? ('assistant' as const) : ('user' as const),
-          content: clean(m.content, MAX_MESSAGE_CHARS),
-          at: typeof m.at === 'number' ? m.at : 0,
-        }))
+        .map((m) => {
+          const role = m.role === 'assistant' ? ('assistant' as const) : ('user' as const);
+          return {
+            role,
+            content: cleanBody(m.content, messageLimit(role)),
+            at: typeof m.at === 'number' ? m.at : 0,
+          };
+        })
         .filter((m) => m.content.length > 0)
         .slice(-MAX_TRANSCRIPT_MESSAGES)
     : [];
@@ -254,8 +299,8 @@ export function appendExchange(
   const now = Date.now();
   const messages = [
     ...session.messages,
-    { role: 'user' as const, content: clean(userText, MAX_MESSAGE_CHARS), at: now },
-    { role: 'assistant' as const, content: clean(assistantText, MAX_MESSAGE_CHARS), at: now },
+    { role: 'user' as const, content: cleanBody(userText, MAX_MESSAGE_CHARS), at: now },
+    { role: 'assistant' as const, content: cleanBody(assistantText, MAX_ASSISTANT_MESSAGE_CHARS), at: now },
   ].slice(-MAX_TRANSCRIPT_MESSAGES);
   return { ...session, messages, updatedAt: now };
 }

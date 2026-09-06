@@ -346,7 +346,7 @@ describe('POST /api/agent — streaming shape', () => {
   it('reports a provider failure as an error event, not a broken stream', async () => {
     cookieJar.set('github_oauth_token', 'gho_ffffffffffffffffffffffffffffff');
     const realFetch = globalThis.fetch;
-    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       if (url.includes('api.github.com')) return githubResponse();
       return new Response('down', { status: 500 });

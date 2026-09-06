@@ -36,6 +36,7 @@ import { describeStanding, getStanding } from '@/lib/student-context';
 import {
   appendExchange,
   describeMemory,
+  forHistory,
   isValidSessionId,
   loadSession,
   newSession,
@@ -212,7 +213,12 @@ export async function POST(request: Request) {
 
   // Keyed on the immutable numeric id, so renaming cannot mint fresh quota.
   const burst = await checkRateLimit(`rl:agent:burst:${viewer.id}`, AGENT_USER_BURST, 60);
-  if (!burst.allowed) return rateLimitedResponse(burst.retryAfter);
+  if (!burst.allowed) {
+    return rateLimitedResponse(
+      burst.retryAfter,
+      `That is ${AGENT_USER_BURST} questions inside a minute. Give it about ${burst.retryAfter} seconds and ask again.`,
+    );
+  }
   const daily = await checkRateLimit(`rl:agent:daily:${viewer.id}`, AGENT_USER_DAILY, DAY_SECONDS);
   if (!daily.allowed) {
     return rateLimitedResponse(daily.retryAfter, `Daily agent limit reached (${AGENT_USER_DAILY}/day).`);
@@ -279,7 +285,7 @@ export async function POST(request: Request) {
   // that replays an edited history can no longer put words in its own mouth.
   const priorTurns: ChatMessage[] = chat.messages.map((m) => ({
     role: m.role,
-    content: m.content,
+    content: forHistory(m),
   }));
   const conversation: ChatMessage[] = userText
     ? [...priorTurns, { role: 'user', content: userText }]
