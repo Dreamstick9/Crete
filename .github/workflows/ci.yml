@@ -40,11 +40,22 @@ jobs:
       - name: Production build
         run: npm run build
 
-  # Secret scanning needs no credentials, so it runs on fork PRs too.
+  # Secret scanning. Runs on fork PRs too: the only credential it needs is the
+  # automatic per-run GITHUB_TOKEN, which is granted to forks as read-only.
   gitleaks:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
+        env:
+          # Required since gitleaks-action v2.3: without it the action exits
+          # with "GITHUB_TOKEN is now required to scan pull requests" and the
+          # job fails before scanning anything. It had been failing that way on
+          # every pull request, so this check has never actually run on one --
+          # it only ever passed on pushes to main, where the code path differs.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
