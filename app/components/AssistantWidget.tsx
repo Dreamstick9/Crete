@@ -211,7 +211,7 @@ export default function AssistantWidget() {
 
           <div
             ref={listRef}
-            className="flex-1 overflow-y-auto overscroll-contain px-4 py-3 space-y-3"
+            className="scroll-rail flex-1 overflow-y-auto overscroll-contain px-4 py-3 space-y-3"
             data-lenis-prevent
           >
             {signedIn === false ? (

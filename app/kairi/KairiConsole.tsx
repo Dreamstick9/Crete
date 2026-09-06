@@ -597,7 +597,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
           + New chat
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto overscroll-contain px-2 pb-3" data-lenis-prevent>
+      <div className="scroll-rail flex-1 overflow-y-auto overscroll-contain px-2 pb-3" data-lenis-prevent>
         {chats.length === 0 ? (
           <p className="px-2 py-3 text-[12.5px] leading-relaxed text-ink-soft">
             Your chats show up here. Each one keeps its own memory for a week.
@@ -651,7 +651,7 @@ export function KairiConsole({ viewer }: { viewer: Viewer }) {
         <div
           ref={scrollRef}
           tabIndex={-1}
-          className="flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+          className="scroll-page flex-1 overflow-y-auto overscroll-contain"
           data-lenis-prevent
         >
           <div className="mx-auto w-full max-w-3xl px-4 pb-6 pt-5 sm:px-6 sm:pt-7">

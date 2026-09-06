@@ -479,3 +479,93 @@ html.lenis, html.lenis body {
     animation: none;
   }
 }
+
+
+/* ── Scrollbars ───────────────────────────────────────────────────────────
+ * `scrollbar-thin` and `scrollbar-none` were used in four places but defined
+ * nowhere — Tailwind v4 ships no scrollbar utilities and this project has no
+ * plugin, so both were silently doing nothing.
+ *
+ * Two panes sit side by side on /kairi and they must not read as one
+ * surface. The chat list is a secondary index and gets a hairline rail; the
+ * transcript is the reading surface and gets a heavier bar with a reserved
+ * gutter, so text does not reflow the moment the bar appears. macOS hides
+ * overlay scrollbars until you move, which is exactly why an always-present
+ * bar is worth the pixels here: it is the only affordance saying "this box
+ * scrolls on its own".
+ *
+ * `scrollbar-color` covers Firefox; the ::-webkit rules cover Chrome, Edge
+ * and Safari. Colours come from the theme variables, so both bars invert
+ * with the dark theme like everything else.
+ */
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+/* The chat list: a 6px hairline that firms up on hover. */
+@utility scroll-rail {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--color-line-strong);
+    border-radius: 9999px;
+  }
+  &:hover::-webkit-scrollbar-thumb {
+    background-color: var(--color-line-heavy);
+  }
+}
+
+/* Alias kept for the admin and repo-activity panes that already ask for it. */
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--color-line-strong);
+    border-radius: 9999px;
+  }
+  &:hover::-webkit-scrollbar-thumb {
+    background-color: var(--color-line-heavy);
+  }
+}
+
+/* The transcript: a 12px bar, inset by a transparent border so the thumb
+ * reads as 6px of ink with breathing room rather than a slab on the edge. */
+@utility scroll-page {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-heavy) transparent;
+
+  &::-webkit-scrollbar {
+    width: 12px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--color-line-heavy);
+    background-clip: content-box;
+    border: 3px solid transparent;
+    border-radius: 9999px;
+  }
+  &:hover::-webkit-scrollbar-thumb {
+    background-color: var(--color-ink-faint);
+  }
+}
