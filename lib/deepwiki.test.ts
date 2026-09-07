@@ -8,7 +8,7 @@
  * it." as though it were an answer about their code.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { askRepo, normalizeRepoName, repoTopics } from './deepwiki';
+import { askRepo, normalizeRepoName, parseIssueRef, repoTopics } from './deepwiki';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -79,6 +79,59 @@ describe('normalizeRepoName', () => {
 
   it('rejects an absurdly long input without scanning it all', () => {
     expect(normalizeRepoName(`${'a'.repeat(400)}/b`)).toBeNull();
+  });
+});
+
+describe('parseIssueRef', () => {
+  it('keeps the number normalizeRepoName throws away', () => {
+    expect(parseIssueRef('https://github.com/facebook/react/issues/123')).toEqual({
+      repo: 'facebook/react',
+      number: 123,
+    });
+    // The same link through the repo-only parser loses the task entirely.
+    expect(normalizeRepoName('https://github.com/facebook/react/issues/123')).toBe('facebook/react');
+  });
+
+  it('accepts pull requests, which share the issue numbering', () => {
+    expect(parseIssueRef('https://github.com/rust-lang/mdBook/pull/45')).toEqual({
+      repo: 'rust-lang/mdBook',
+      number: 45,
+    });
+  });
+
+  it('accepts the shapes a student actually pastes', () => {
+    for (const input of [
+      'https://www.github.com/a/b/issues/7',
+      'http://github.com/a/b/issues/7',
+      'https://github.com/a/b/issues/7/',
+      'https://github.com/a/b/issues/7#issuecomment-99',
+      'https://github.com/a/b/issues/7?foo=bar',
+      '  a/b#7  ',
+    ]) {
+      expect(parseIssueRef(input)).toEqual({ repo: 'a/b', number: 7 });
+    }
+  });
+
+  it('refuses anything that is not a specific issue', () => {
+    for (const input of [
+      'https://github.com/facebook/react',
+      'https://github.com/a/b/issues/0',
+      'https://github.com/a/b/issues/abc',
+      'https://evil.com/a/b/issues/1',
+      'https://github.com/a/b/tree/main',
+      'a/b',
+      'a/b#0',
+      '#123',
+      '',
+      null,
+      42,
+    ]) {
+      expect(parseIssueRef(input as unknown)).toBeNull();
+    }
+  });
+
+  it('rejects a number too large to be real, which is a probe not a typo', () => {
+    expect(parseIssueRef('a/b#99999999')).toBeNull();
   });
 });
 

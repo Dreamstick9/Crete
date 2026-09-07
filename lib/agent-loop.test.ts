@@ -382,3 +382,89 @@ describe('runAgent — output guardrail', () => {
     expect(result.reply).toBe('I withheld this response: it tripped a safety filter.');
   });
 });
+
+describe('runAgent — untrusted envelope survives truncation', () => {
+  /** A tool whose result is long enough that the envelope lands near the cap. */
+  function bigTool(chars: number): ToolDef {
+    return {
+      name: 'big',
+      description: 'stub big',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      needsLogin: false,
+      costsSearch: false,
+      untrusted: true,
+      run: async () => ({ ok: true, summary: 'x'.repeat(chars) }),
+    };
+  }
+
+  it('never severs the closing delimiter on a result at the cap', async () => {
+    // Wrapping first and truncating second used to cut the closing tag off,
+    // which ends the quarantine early and lets everything after a long
+    // repository or issue payload read as trusted text.
+    const { fetchImpl, requests } = makeProvider([
+      toolCallResponse([{ id: 'c1', name: 'big', args: {} }]),
+      textResponse('done'),
+    ]);
+    await runAgent(
+      { messages: [{ role: 'user', content: 'go' }], username: null, requestId: 'r1' },
+      { tools: [bigTool(5000)], fetchImpl, contextBlock: CONTEXT },
+    );
+    const toolMsg = requests[1].messages.find((m) => m.role === 'tool');
+    const content = String(toolMsg?.content ?? '');
+    expect(content).toContain('<retrieved_data>');
+    expect(content.trimEnd().endsWith('</retrieved_data>')).toBe(true);
+  });
+});
+
+describe('runAgent — batchSize', () => {
+  /** Reports the batchSize the loop handed it, so the wiring is observable. */
+  function reportingTool(): { tool: ToolDef; seen: Array<number | undefined> } {
+    const seen: Array<number | undefined> = [];
+    return {
+      seen,
+      tool: {
+        name: 'ask',
+        description: 'stub ask',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        needsLogin: false,
+        costsSearch: false,
+        run: async (_args, ctx) => {
+          seen.push(ctx.batchSize);
+          return { ok: true, summary: 'answer' };
+        },
+      },
+    };
+  }
+
+  it('tells each tool how many calls shared its turn', async () => {
+    // explain_repo shrinks its per-answer cap on this signal, so three narrow
+    // questions cost about what one broad one costs.
+    const { tool, seen } = reportingTool();
+    const { fetchImpl } = makeProvider([
+      toolCallResponse([
+        { id: 'a', name: 'ask', args: { q: 1 } },
+        { id: 'b', name: 'ask', args: { q: 2 } },
+        { id: 'c', name: 'ask', args: { q: 3 } },
+      ]),
+      textResponse('done'),
+    ]);
+    await runAgent(
+      { messages: [{ role: 'user', content: 'go' }], username: null, requestId: 'r1' },
+      { tools: [tool], fetchImpl, contextBlock: CONTEXT },
+    );
+    expect(seen).toEqual([3, 3, 3]);
+  });
+
+  it('reports 1 for a lone call, so the full answer cap still applies', async () => {
+    const { tool, seen } = reportingTool();
+    const { fetchImpl } = makeProvider([
+      toolCallResponse([{ id: 'a', name: 'ask', args: {} }]),
+      textResponse('done'),
+    ]);
+    await runAgent(
+      { messages: [{ role: 'user', content: 'go' }], username: null, requestId: 'r1' },
+      { tools: [tool], fetchImpl, contextBlock: CONTEXT },
+    );
+    expect(seen).toEqual([1]);
+  });
+});

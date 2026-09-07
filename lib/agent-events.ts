@@ -187,6 +187,7 @@ export const TOOL_LABELS: Record<string, { running: string; done: string }> = {
   site_help: { running: 'Reading the site guide', done: 'read the site guide' },
   search_site_docs: { running: 'Searching the site guide', done: 'searched the site guide' },
   find_repo_issues: { running: 'Reading the open issues in that repo', done: 'read the open issues in that repo' },
+  read_issue: { running: 'Reading the issue', done: 'read the issue' },
   explain_repo: { running: 'Studying how that repo works', done: 'studied how that repo works' },
   repo_overview: { running: 'Skimming that repo’s documentation', done: 'skimmed that repo’s documentation' },
   web_search: { running: 'Searching the web', done: 'searched the web' },

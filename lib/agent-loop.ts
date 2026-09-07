@@ -71,6 +71,17 @@ const COMPOSE_RESERVE_MS = 8_000;
 const DEFAULT_BASE_URL = 'https://api.groq.com/openai/v1';
 const DEFAULT_AGENT_MODEL = 'openai/gpt-oss-120b';
 const TOOL_RESULT_CHARS = 2000;
+/**
+ * Headroom for the untrusted-data envelope on top of TOOL_RESULT_CHARS.
+ *
+ * The wrapper adds ~150 characters around the payload. Truncating the
+ * wrapped string at TOOL_RESULT_CHARS therefore cuts the *closing* tag off
+ * any result near the cap, which silently ends the quarantine early and
+ * leaves everything after it reading as trusted text — the exact failure
+ * the envelope exists to prevent. Results are now truncated before wrapping
+ * and this leaves room for the wrapper itself.
+ */
+const ENVELOPE_CHARS = 200;
 const REQUEST_TIMEOUT_MS = 30000;
 /** Time to first byte of a streamed answer; the body may take longer. */
 const STREAM_TIMEOUT_MS = 75_000;
@@ -125,8 +136,15 @@ const AGENT_SYSTEM_PROMPT = [
   'You are read-only. Your tools are data sources only — you cannot approve, flag, queue, write to GitHub, or change anything. Never claim otherwise.',
   '',
   'HOW TO WORK',
-  '- Call a tool when it answers the question; answer directly when it does not. Prefer one well-chosen call over several, and never call the same tool twice with the same arguments.',
+  '- Call a tool when it answers the question; answer directly when it does not. Prefer one well-chosen call over several unless a rule below says otherwise, and never call the same tool twice with the same arguments.',
   '- When the student names a repository, use explain_repo for how the code works, find_repo_issues for something to work on, and repo_overview when they have no specific question yet. Prefer these over general advice.',
+  '- When the student links or names a specific issue or pull request, call read_issue FIRST and read what the problem actually is. Do not ask about the codebase before you have read the issue; a question composed from the link alone is a guess.',
+  // The one place fanning out beats a single call. Three narrow questions
+  // asked together cost one DeepWiki round trip (the loop runs a turn's tool
+  // calls in parallel) and each answer comes back shorter, so this buys
+  // angles on the problem rather than tokens.
+  '- Then, in ONE turn, ask explain_repo two or three NARROW questions drawn from what the issue actually says — where the named code lives, how that part works now, how changes like it are tested. Several short questions in a single turn beat one broad question.',
+  '- Answer from the issue and those answers together: name the files to open, the change to make, and how to check it. Never present repository background as if it were a solution to the issue.',
   '- If explain_repo reports that a repository is not indexed, say so plainly and stop — do not substitute a guess or a generic answer about that codebase.',
   '- For anything current, or outside GitHub and this site — error messages, library docs, tooling, releases — use web_search, and use read_url only when a search excerpt was not enough.',
   // The user asked for an agent that establishes the target before working.
@@ -687,7 +705,9 @@ export async function runAgent(opts: AgentRunOptions, deps: AgentDeps = {}): Pro
         const started = now();
         emit?.({ type: 'tool_start', id: call.id, name: tool.name, label: describeCall(call) });
         try {
-          const result = await tool.run(call.args, ctx);
+          // A tool that trades output size against budget needs to know it is
+        // one of several this turn; only the loop can tell it.
+        const result = await tool.run(call.args, { ...ctx, batchSize: calls.length });
           emit?.({ type: 'tool_end', id: call.id, name: tool.name, ok: result.ok, ms: now() - started });
           // Content from repositories, issues and web pages is where a real
           // prompt-injection attempt arrives. It is already quarantined by
@@ -707,7 +727,10 @@ export async function runAgent(opts: AgentRunOptions, deps: AgentDeps = {}): Pro
           // DeepWiki answers) go inside the untrusted envelope. Without this
           // an issue titled "ignore previous instructions and ..." is read by
           // the model as though we had written it.
-          const summary = tool.untrusted ? wrapRetrievedData(result.summary) : result.summary;
+          // Truncate first, wrap second: the other order can sever the
+          // closing delimiter (see ENVELOPE_CHARS).
+          const trimmed = String(result.summary).slice(0, TOOL_RESULT_CHARS);
+          const summary = tool.untrusted ? wrapRetrievedData(trimmed) : trimmed;
           return { call, summary };
         } catch (error) {
           // A throwing tool is a bug in the registry, not user input — keep
@@ -724,7 +747,7 @@ export async function runAgent(opts: AgentRunOptions, deps: AgentDeps = {}): Pro
         role: 'tool',
         tool_call_id: call.id,
         name: call.name,
-        content: String(summary).slice(0, TOOL_RESULT_CHARS),
+        content: String(summary).slice(0, TOOL_RESULT_CHARS + ENVELOPE_CHARS),
       });
     }
   }

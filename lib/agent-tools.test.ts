@@ -1,9 +1,13 @@
 /**
- * Tool-registry tests. Only pure paths run here: registry invariants, arg
- * validation (which always rejects before any fetch), the static site_help
- * answers, and sanitization. Nothing in this file touches the network.
+ * Tool-registry tests: registry invariants, arg validation (which always
+ * rejects before any fetch), the static site_help answers, and sanitization.
+ *
+ * read_issue is the one tool exercised through a stubbed `fetch`, because
+ * the thing worth testing about it — that a long comment thread cannot push
+ * the description past the summary cap — only happens after a response comes
+ * back. No test here reaches the real network.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { TOOLS, getTool, guestAllowedTools, toolSchemasForModel, type AgentContext } from './agent-tools';
 import { sanitizeField } from './assistant';
 
@@ -28,6 +32,7 @@ describe('registry invariants', () => {
       'site_help',
       // Repo-scoped work: the "here is a repo, help me contribute to it" path.
       'find_repo_issues',
+      'read_issue',
       'explain_repo',
       'repo_overview',
       // Live web, routed through a provider so we never fetch a URL ourselves.
@@ -41,7 +46,14 @@ describe('registry invariants', () => {
     // The loop only wraps results in the injection envelope when this flag is
     // set, so forgetting it on a new tool silently removes the control.
     const byName = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
-    for (const name of ['find_repo_issues', 'explain_repo', 'repo_overview', 'web_search', 'read_url']) {
+    for (const name of [
+      'find_repo_issues',
+      'read_issue',
+      'explain_repo',
+      'repo_overview',
+      'web_search',
+      'read_url',
+    ]) {
       expect(byName[name].untrusted).toBe(true);
     }
   });
@@ -247,5 +259,105 @@ describe('site_help — flagging rule matches lib/repo-score', () => {
     expect(result.ok).toBe(true);
     expect(result.summary).not.toMatch(/5 GitHub stars/);
     expect(result.summary).toMatch(/archived|fork/);
+  });
+});
+
+describe('read_issue', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  /** Stubs the issue call and, when asked for, the comments call. */
+  function stub(issue: unknown, comments: unknown = []) {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes('/comments') ? comments : issue;
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  it('rejects bad input before making any request', async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error('read_issue must validate before it fetches');
+    }) as unknown as typeof fetch;
+
+    expect((await run('read_issue', { repo: 'not a repo', number: 1 })).ok).toBe(false);
+    expect((await run('read_issue', { repo: 'a/b/c', number: 1 })).ok).toBe(false);
+    // A repo with no number is not a task; asking is better than guessing #1.
+    const noNumber = await run('read_issue', { repo: 'facebook/react' });
+    expect(noNumber.ok).toBe(false);
+    expect(noNumber.summary).toContain('issue number');
+    // Out of range is a distinct mistake: telling someone who gave a number
+    // to give a number sends them round the same loop.
+    const tooBig = await run('read_issue', { repo: 'facebook/react', number: 99999999 });
+    expect(tooBig.ok).toBe(false);
+    expect(tooBig.summary).toContain('not a real issue number');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('takes the number from a pasted issue URL', async () => {
+    stub({ number: 12, title: 'Button loses focus', state: 'open', body: 'Steps', comments: 0 });
+    const res = await run('read_issue', { repo: 'https://github.com/a/b/issues/12' });
+    expect(res.ok).toBe(true);
+    expect(res.summary).toContain('a/b#12');
+    expect(res.summary).toContain('Button loses focus');
+    expect(String((globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0]))
+      .toBe('https://api.github.com/repos/a/b/issues/12');
+  });
+
+  it('reads a pull request through the same endpoint and says which it is', async () => {
+    stub({ number: 45, title: 'Fix focus', state: 'open', pull_request: {}, comments: 0 });
+    const res = await run('read_issue', { repo: 'a/b', number: 45 });
+    expect(res.ok).toBe(true);
+    expect(res.summary).toContain('pull request');
+    expect(res.summary).toContain('https://github.com/a/b/pull/45');
+  });
+
+  it('flags an assigned issue, because it is somebody else’s work', async () => {
+    stub({ number: 3, title: 'Taken', state: 'open', assignee: { login: 'someone' }, comments: 0 });
+    expect((await run('read_issue', { repo: 'a/b', number: 3 })).summary).toContain('already assigned');
+  });
+
+  it('keeps the whole summary inside the cap when the thread is long', async () => {
+    stub(
+      { number: 9, title: 'Long', state: 'open', body: 'x'.repeat(9000), comments: 3 },
+      Array.from({ length: 3 }, (_, i) => ({ user: { login: `dev${i}` }, body: 'y'.repeat(9000) })),
+    );
+    const res = await run('read_issue', { repo: 'a/b', number: 9 });
+    expect(res.ok).toBe(true);
+    expect(res.summary.length).toBeLessThanOrEqual(2000);
+    // The comments survive rather than being cut off by the cap: the body is
+    // what gives way, because it is trimmed to the room actually left.
+    expect(res.summary).toContain('@dev2');
+  });
+
+  it('preserves newlines in a body, unlike sanitizeField', async () => {
+    stub({ number: 1, title: 'T', state: 'open', body: '1. one\n2. two', comments: 0 });
+    const res = await run('read_issue', { repo: 'a/b', number: 1 });
+    expect(res.summary).toContain('1. one\n2. two');
+  });
+
+  it('still returns the issue when the comment thread cannot be read', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/comments')) throw new Error('network');
+      return new Response(JSON.stringify({ number: 5, title: 'T', state: 'open', comments: 4 }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const res = await run('read_issue', { repo: 'a/b', number: 5 });
+    expect(res.ok).toBe(true);
+    expect(res.summary).toContain('a/b#5');
+  });
+
+  it('reports a missing issue as a miss, not an answer', async () => {
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 404 })) as unknown as typeof fetch;
+    const res = await run('read_issue', { repo: 'a/b', number: 404 });
+    expect(res.ok).toBe(false);
+    expect(res.summary).toContain('No public issue');
   });
 });

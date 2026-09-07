@@ -20,7 +20,7 @@
 import { sanitizeField } from './assistant';
 import { getStudentsKV } from './kv-students';
 import { getFlaggedPRs } from './flagged';
-import { askRepo, normalizeRepoName, repoTopics } from './deepwiki';
+import { FOCUSED_ANSWER_CHARS, askRepo, normalizeRepoName, parseIssueRef, repoTopics } from './deepwiki';
 import { readUrls, webSearch } from './websearch';
 
 export interface AgentContext {
@@ -37,6 +37,14 @@ export interface AgentContext {
    * discloses nothing about the student.
    */
   sessionId?: string;
+  /**
+   * How many tool calls the model asked for in this one turn. Set by the
+   * loop, which is the only place that knows. A tool whose output is a token
+   * budget rather than a fixed payload uses it to shrink: three narrow
+   * DeepWiki questions asked together should cost about what one broad one
+   * costs, and without this each call would happily return its full cap.
+   */
+  batchSize?: number;
 }
 
 /**
@@ -101,6 +109,27 @@ function ok(summary: string): ToolResult {
 
 function isArgsObject(args: unknown): args is Record<string, unknown> {
   return typeof args === 'object' && args !== null && !Array.isArray(args);
+}
+
+/**
+ * Like `sanitizeField`, but keeps newlines.
+ *
+ * An issue body is Markdown: the reproduction steps are a numbered list and
+ * the stack trace is a fenced block. `sanitizeField` collapses all
+ * whitespace, which is correct for a title and destroys a body — it turns
+ * the one part of an issue the model most needs to read accurately into a
+ * single run-on line. Control characters still go, and so do runs of blank
+ * lines, which are pure token cost.
+ */
+function sanitizeBody(value: unknown, maxLength: number): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, maxLength);
 }
 
 async function getMyStanding(
@@ -516,14 +545,153 @@ async function findRepoIssues(args: Record<string, unknown>, ctx: AgentContext):
 }
 
 /**
+ * One specific issue or pull request, read in full.
+ *
+ * This is the tool that makes "help me solve this" mean anything. Without
+ * it the agent answered issue links from a repository summary alone: it
+ * knew how the codebase was laid out and had never seen a word of the
+ * problem it was being asked to solve, so the DeepWiki question it composed
+ * was a guess at what the issue probably said.
+ *
+ * Deliberately NOT part of find_repo_issues, which lists candidates and
+ * drops pull requests entirely. `/repos/{owner}/{repo}/issues/{n}` serves
+ * issues and PRs from the same numbering, so a student pasting either kind
+ * of link is answered here.
+ *
+ * Everything this returns was typed by a stranger into a public text box,
+ * which is the single most likely place for a prompt-injection payload to
+ * reach us. Registered `untrusted: true`.
+ */
+const MAX_ISSUE_BODY_CHARS = 1200;
+const MAX_ISSUE_COMMENTS = 3;
+const MAX_COMMENT_CHARS = 260;
+
+async function readIssue(args: Record<string, unknown>, ctx: AgentContext): Promise<ToolResult> {
+  if (!isArgsObject(args)) return fail('Invalid arguments: expected {repo, number}.');
+
+  // The repo argument may itself be a full issue URL carrying the number, so
+  // try that first and let an explicit `number` override it.
+  const ref = parseIssueRef(args.repo) ?? parseIssueRef(args.issue);
+  const repo = ref?.repo ?? normalizeRepoName(args.repo);
+  if (!repo) return fail('Invalid repo: give it as "<owner>/<repo>" or a github.com issue link.');
+
+  const explicit =
+    typeof args.number === 'number' && Number.isFinite(args.number) ? Math.floor(args.number) : null;
+  const number = explicit ?? ref?.number ?? null;
+  if (number === null) {
+    return fail(`Give me the issue number in ${repo} — for example 123, or the full issue link.`);
+  }
+  // Out of range is a different mistake from absent, and saying "give me a
+  // number" to someone who just gave one sends them round the same loop.
+  if (number < 1 || number > MAX_PR_NUMBER) {
+    return fail(`${number} is not a real issue number in ${repo}.`);
+  }
+
+  const base = `https://api.github.com/repos/${repo}/issues/${number}`;
+  let res: Response;
+  try {
+    res = await fetch(base, { headers: callerHeaders(ctx), signal: AbortSignal.timeout(10000) });
+  } catch {
+    return fail('GitHub did not respond in time. Try again in a moment.');
+  }
+  if (res.status === 404) return fail(`No public issue ${repo}#${number} — check the number.`);
+  if (res.status === 403) return fail('GitHub rate limit reached for this token. Try again later.');
+  if (!res.ok) return fail(`GitHub returned ${res.status} for ${repo}#${number}.`);
+
+  let raw: unknown;
+  try {
+    raw = await res.json();
+  } catch {
+    return fail('GitHub sent a malformed response.');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('GitHub sent an unexpected response.');
+  }
+  const issue = raw as Record<string, unknown>;
+
+  const isPR = 'pull_request' in issue;
+  const kind = isPR ? 'pull request' : 'issue';
+  const title = sanitizeField(issue.title, 140);
+  const state = sanitizeField(issue.state, 12) || 'unknown';
+  const author =
+    issue.user && typeof issue.user === 'object'
+      ? sanitizeField((issue.user as Record<string, unknown>).login, 39)
+      : '';
+  const labels = Array.isArray(issue.labels)
+    ? issue.labels
+        .map((l) => (l && typeof l === 'object' ? (l as Record<string, unknown>).name : l))
+        .filter((n): n is string => typeof n === 'string')
+        .slice(0, 6)
+        .map((n) => sanitizeField(n, 30))
+        .join(', ')
+    : '';
+  const assigned =
+    !!issue.assignee || (Array.isArray(issue.assignees) && issue.assignees.length > 0);
+  const commentCount = typeof issue.comments === 'number' ? issue.comments : 0;
+
+  // Maintainer replies early in a thread are where "here is where to look"
+  // and "go ahead, it is yours" live, which is exactly the context a
+  // beginner needs. GitHub returns comments oldest-first by default.
+  let comments: string[] = [];
+  if (commentCount > 0) {
+    try {
+      const cRes = await fetch(`${base}/comments?per_page=${MAX_ISSUE_COMMENTS}`, {
+        headers: callerHeaders(ctx),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (cRes.ok) {
+        const cRaw: unknown = await cRes.json();
+        if (Array.isArray(cRaw)) {
+          comments = cRaw
+            .filter((c): c is Record<string, unknown> => !!c && typeof c === 'object')
+            .slice(0, MAX_ISSUE_COMMENTS)
+            .map((c) => {
+              const who =
+                c.user && typeof c.user === 'object'
+                  ? sanitizeField((c.user as Record<string, unknown>).login, 39)
+                  : 'someone';
+              return `- @${who}: ${sanitizeField(c.body, MAX_COMMENT_CHARS)}`;
+            })
+            .filter((line) => line.length > 6);
+        }
+      }
+    } catch {
+      // A comment thread we could not read is not a failed lookup; the issue
+      // itself is the load-bearing part and we already have it.
+    }
+  }
+
+  const header =
+    `${repo}#${number} — ${kind}, ${state}${assigned ? ', already assigned' : ', unassigned'}\n` +
+    `Title: ${title}\n` +
+    (author ? `Opened by @${author}\n` : '') +
+    (labels ? `Labels: ${labels}\n` : '') +
+    `Link: https://github.com/${repo}/${isPR ? 'pull' : 'issues'}/${number}\n`;
+  const commentBlock = comments.length
+    ? `\nFirst ${comments.length} comment${comments.length > 1 ? 's' : ''} of ${commentCount}:\n${comments.join('\n')}`
+    : '';
+
+  // The body is trimmed last and to whatever room is left, so a long thread
+  // never pushes the summary past the cap and silently truncates the tail —
+  // which is where `ok()` would otherwise cut, mid-comment.
+  const room = MAX_SUMMARY_CHARS - header.length - commentBlock.length - 40;
+  const body = sanitizeBody(issue.body, Math.min(MAX_ISSUE_BODY_CHARS, Math.max(room, 0)));
+
+  return ok(`${header}${body ? `\nDescription:\n${body}` : '\nNo description was given.'}${commentBlock}`);
+}
+
+/**
  * Repository comprehension, delegated to DeepWiki.
  *
  * The alternative — cloning and reading the repo ourselves — costs more
  * tokens than this deployment has in a day. See lib/deepwiki.ts.
  */
-async function explainRepo(args: Record<string, unknown>): Promise<ToolResult> {
+async function explainRepo(args: Record<string, unknown>, ctx: AgentContext): Promise<ToolResult> {
   if (!isArgsObject(args)) return fail('Invalid arguments: expected {repo, question}.');
-  const result = await askRepo(args.repo, args.question);
+  // Several questions in one turn get shorter answers each, so asking three
+  // narrow things costs roughly what asking one broad thing costs.
+  const fannedOut = typeof ctx?.batchSize === 'number' && ctx.batchSize > 1;
+  const result = await askRepo(args.repo, args.question, fannedOut ? FOCUSED_ANSWER_CHARS : undefined);
   if (result.ok) {
     return ok(
       `DeepWiki on ${normalizeRepoName(args.repo)}:\n${result.text}` +
@@ -685,9 +853,35 @@ export const TOOLS: ToolDef[] = [
     run: (args, ctx) => findRepoIssues(args, ctx),
   },
   {
+    name: 'read_issue',
+    description:
+      'Read ONE specific GitHub issue or pull request in full — its title, state, labels, description and first few comments. Call this first whenever the student links or names a specific issue or PR, before asking anything about the codebase: it tells you what the actual task is instead of leaving you to guess from the link.',
+    parameters: {
+      type: 'object',
+      properties: {
+        repo: {
+          type: 'string',
+          description:
+            'Repository as "<owner>/<repo>", or the full github.com issue/pull URL (the number is taken from it).',
+        },
+        number: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Issue or pull request number. Optional when the repo field is a full issue URL.',
+        },
+      },
+      required: ['repo'],
+      additionalProperties: false,
+    },
+    needsLogin: false,
+    costsSearch: false,
+    untrusted: true, // an issue body is a public text box a stranger typed into
+    run: (args, ctx) => readIssue(args, ctx),
+  },
+  {
     name: 'explain_repo',
     description:
-      'Ask a grounded question about how a specific GitHub repository works — its architecture, where a feature lives, how to set it up, what a module does, or where to start on an issue. Backed by DeepWiki, which has already indexed most public repositories. Use this instead of guessing about unfamiliar code.',
+      'Ask a grounded question about how a specific GitHub repository works — its architecture, where a feature lives, how to set it up, what a module does, or where to start on an issue. Backed by DeepWiki, which has already indexed most public repositories. Use this instead of guessing about unfamiliar code. Working a specific issue: ask two or three NARROW questions in the same turn rather than one broad one — several short answers beat one long one.',
     parameters: {
       type: 'object',
       properties: {
@@ -703,7 +897,7 @@ export const TOOLS: ToolDef[] = [
     needsLogin: false,
     costsSearch: false,
     untrusted: true, // third-party summary of a repo anyone can edit
-    run: (args) => explainRepo(args),
+    run: (args, ctx) => explainRepo(args, ctx),
   },
   {
     name: 'repo_overview',

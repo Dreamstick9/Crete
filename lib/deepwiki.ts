@@ -48,6 +48,15 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_ANSWER_CHARS = 1800;
 const MAX_STRUCTURE_CHARS = 900;
 
+/**
+ * Per-answer cap when the agent asks several narrow questions in one turn
+ * instead of one broad one (see the issue-workflow rule in
+ * lib/agent-loop.ts). Three answers at this size cost about what one
+ * uncapped answer costs, so the fan-out buys the model more angles on the
+ * problem rather than more tokens.
+ */
+export const FOCUSED_ANSWER_CHARS = 900;
+
 const REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 
 export type DeepWikiFailure = 'not_indexed' | 'bad_repo' | 'unavailable';
@@ -92,6 +101,62 @@ export function normalizeRepoName(raw: unknown): string | null {
   return REPO_RE.test(name) ? name : null;
 }
 
+/**
+ * A reference to one issue or pull request.
+ *
+ * `normalizeRepoName` deliberately throws the rest of a URL away, which is
+ * right for "what is this repo" questions and wrong for "help me with this
+ * issue": the number is the only part that identifies the actual task. This
+ * parser keeps it.
+ *
+ * GitHub numbers issues and pull requests from the same sequence, and
+ * `/repos/{owner}/{repo}/issues/{n}` serves both, so a `/pull/` link is
+ * accepted here and resolved through the same endpoint.
+ */
+export interface IssueRef {
+  repo: string;
+  number: number;
+}
+
+/** Above this an issue number is a typo or a probe, not a real reference. */
+const MAX_ISSUE_NUMBER = 10_000_000;
+
+const ISSUE_URL_RE =
+  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]{1,100})\/([A-Za-z0-9_.-]{1,100})\/(?:issues|pull)\/(\d{1,8})(?:[/?#].*)?$/i;
+const ISSUE_HASH_RE = /^([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})#(\d{1,8})$/;
+
+/**
+ * Accepts the forms a student actually pastes — a full issue or pull URL, or
+ * the `owner/repo#123` shorthand — and yields a validated repo plus number.
+ *
+ * Both parts are interpolated into an api.github.com path, so this function
+ * is the control that keeps them from being anything but a repo name and a
+ * number.
+ */
+export function parseIssueRef(raw: unknown): IssueRef | null {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s || s.length > 300) return null;
+
+  const url = s.match(ISSUE_URL_RE);
+  if (url) {
+    const repo = normalizeRepoName(`${url[1]}/${url[2]}`);
+    const number = Number(url[3]);
+    if (!repo || !Number.isInteger(number) || number < 1 || number > MAX_ISSUE_NUMBER) return null;
+    return { repo, number };
+  }
+
+  const hash = s.match(ISSUE_HASH_RE);
+  if (hash) {
+    const repo = normalizeRepoName(hash[1]);
+    const number = Number(hash[2]);
+    if (!repo || !Number.isInteger(number) || number < 1 || number > MAX_ISSUE_NUMBER) return null;
+    return { repo, number };
+  }
+
+  return null;
+}
+
 export function isDeepWikiEnabled(): boolean {
   // Keyless, so there is nothing to configure. The flag exists so an operator
   // can turn the outbound dependency off without a code change.
@@ -133,8 +198,19 @@ async function ask(
   return { ok: true, text, truncated };
 }
 
-/** Asks DeepWiki a grounded question about a repository. */
-export async function askRepo(repoRaw: unknown, questionRaw: unknown): Promise<DeepWikiResult> {
+/**
+ * Asks DeepWiki a grounded question about a repository.
+ *
+ * `maxChars` exists so a turn that asks three narrow questions at once does
+ * not cost three times a single broad one: the loop re-sends every tool
+ * result on every remaining iteration, so the cap is a budget lever, not a
+ * formatting preference.
+ */
+export async function askRepo(
+  repoRaw: unknown,
+  questionRaw: unknown,
+  maxChars: number = MAX_ANSWER_CHARS,
+): Promise<DeepWikiResult> {
   if (!isDeepWikiEnabled()) {
     return { ok: false, reason: 'unavailable', detail: 'Repository lookup is turned off on this deployment.' };
   }
@@ -146,7 +222,9 @@ export async function askRepo(repoRaw: unknown, questionRaw: unknown): Promise<D
   if (!question) {
     return { ok: false, reason: 'bad_repo', detail: 'Ask a specific question about the repository.' };
   }
-  return ask('ask_question', { repoName: repo, question }, MAX_ANSWER_CHARS);
+  const limit =
+    Number.isFinite(maxChars) ? Math.min(Math.max(Math.floor(maxChars), 200), MAX_ANSWER_CHARS) : MAX_ANSWER_CHARS;
+  return ask('ask_question', { repoName: repo, question }, limit);
 }
 
 /**
