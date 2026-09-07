@@ -97,6 +97,13 @@ export function normalizeRepoName(raw: unknown): string | null {
   const segments = s.split('/').filter(Boolean);
   const parts = isUrl ? segments.slice(0, 2) : segments;
   if (parts.length !== 2) return null;
+  // REPO_RE allows dots, so "." and ".." satisfy it — and callers interpolate
+  // the result straight into an api.github.com path, where URL normalization
+  // then resolves those segments and silently rewrites which endpoint is
+  // called ("../.." turns /repos/../../issues/1 into /issues/1). GitHub has
+  // no owner or repository named with dots alone, so rejecting them costs
+  // nothing and keeps the path shape the caller wrote.
+  if (parts.some((part) => /^\.+$/.test(part))) return null;
   const name = parts.join('/');
   return REPO_RE.test(name) ? name : null;
 }

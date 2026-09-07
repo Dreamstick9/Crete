@@ -82,6 +82,25 @@ describe('normalizeRepoName', () => {
   });
 });
 
+describe('normalizeRepoName — path traversal', () => {
+  it('rejects dot-only segments, which rewrite the API path they are put in', () => {
+    // Callers interpolate this into `https://api.github.com/repos/${repo}/...`
+    // and URL normalization resolves the dots, so "../.." would turn a repo
+    // lookup into a call to an entirely different endpoint.
+    for (const input of ['../..', 'a/..', '../user', 'a/.', './.', '../../etc', '..%2f..']) {
+      expect(normalizeRepoName(input)).toBeNull();
+    }
+    expect(parseIssueRef('../..#1')).toBeNull();
+    expect(parseIssueRef('https://github.com/../../issues/9')).toBeNull();
+  });
+
+  it('still accepts the dots that appear in real repository names', () => {
+    expect(normalizeRepoName('a/b.js')).toBe('a/b.js');
+    expect(normalizeRepoName('vercel/next.js')).toBe('vercel/next.js');
+    expect(normalizeRepoName('a/.github')).toBe('a/.github');
+  });
+});
+
 describe('parseIssueRef', () => {
   it('keeps the number normalizeRepoName throws away', () => {
     expect(parseIssueRef('https://github.com/facebook/react/issues/123')).toEqual({
