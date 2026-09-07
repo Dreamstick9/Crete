@@ -180,6 +180,8 @@ export async function readAgentEvents(
  */
 export const TOOL_LABELS: Record<string, { running: string; done: string }> = {
   get_my_standing: { running: 'Checking your standing', done: 'checked your standing' },
+  my_recent_prs: { running: 'Looking up your pull requests', done: 'looked up your pull requests' },
+  my_recent_commits: { running: 'Looking up your recent commits', done: 'looked up your recent commits' },
   explain_flag: { running: 'Looking up why that PR was flagged', done: 'looked up a flagged PR' },
   find_good_first_issues: { running: 'Searching GitHub for beginner issues', done: 'searched for beginner issues' },
   lookup_contributor: { running: 'Looking up a GitHub profile', done: 'looked up a GitHub profile' },

@@ -137,6 +137,12 @@ const AGENT_SYSTEM_PROMPT = [
   '',
   'HOW TO WORK',
   '- Call a tool when it answers the question; answer directly when it does not. Prefer one well-chosen call over several unless a rule below says otherwise, and never call the same tool twice with the same arguments.',
+  // A real session: asked "what were my last commits", the model ran a
+  // web_search for `site:github.com/<user>/commits`, read the page it got
+  // back, and then told the student to go look at GitHub themselves. It had
+  // no tool that could answer, and searching the web for a person's GitHub
+  // activity never works. Both halves of that are fixed here.
+  '- When the student asks about their own work \u2014 "my commits", "my last PR", "what did I get merged", "how am I doing" \u2014 use my_recent_commits, my_recent_prs and get_my_standing. You are signed in as them, so answer with their actual work. Never web_search a person\u2019s GitHub activity and never send them off to check GitHub themselves.',
   '- When the student names a repository, use explain_repo for how the code works, find_repo_issues for something to work on, and repo_overview when they have no specific question yet. Prefer these over general advice.',
   '- When the student links or names a specific issue or pull request, call read_issue FIRST and read what the problem actually is. Do not ask about the codebase before you have read the issue; a question composed from the link alone is a guess.',
   // The one place fanning out beats a single call. Three narrow questions

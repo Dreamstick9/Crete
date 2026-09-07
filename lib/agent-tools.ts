@@ -19,6 +19,7 @@
 
 import { sanitizeField } from './assistant';
 import { getStudentsKV } from './kv-students';
+import { getStanding } from './student-context';
 import { getFlaggedPRs } from './flagged';
 import { FOCUSED_ANSWER_CHARS, askRepo, normalizeRepoName, parseIssueRef, repoTopics } from './deepwiki';
 import { readUrls, webSearch } from './websearch';
@@ -95,6 +96,17 @@ const LANGUAGE_RE = /^[A-Za-z0-9+#-]+$/;
 const MAX_LIMIT = 100;
 const MAX_PR_NUMBER = 10_000_000;
 
+/** Default and ceiling for the caller-scoped "my …" list tools. Small on
+ *  purpose: these results ride inside a 2,000-character tool budget shared
+ *  with everything else in the turn. */
+const MY_ITEMS_DEFAULT = 5;
+const MY_ITEMS_MAX = 10;
+const MY_TITLE_CHARS = 120;
+const MY_COMMIT_CHARS = 100;
+/** One page is enough to re-sort a recent window locally; see myRecentPRs. */
+const PR_SEARCH_PER_PAGE = 50;
+const PR_STATES = ['merged', 'open', 'closed', 'all'] as const;
+
 function cap(summary: string): string {
   return summary.length > MAX_SUMMARY_CHARS ? summary.slice(0, MAX_SUMMARY_CHARS) : summary;
 }
@@ -132,38 +144,388 @@ function sanitizeBody(value: unknown, maxLength: number): string {
     .slice(0, maxLength);
 }
 
+/**
+ * The signed-in caller's own GitHub login, or null.
+ *
+ * Every "my …" tool routes through this rather than reading ctx.username
+ * directly, for two reasons: a tool must never accept a username argument
+ * (the login is whatever lib/session.ts verified against GitHub's /user, and
+ * a login that arrived in a request body was the impersonation bug this
+ * stack has already had once), and the value is interpolated into a GitHub
+ * search query, so it has to match USERNAME_RE before it goes anywhere near
+ * one.
+ */
+function callerLogin(ctx: AgentContext): string | null {
+  if (!ctx || typeof ctx.username !== 'string') return null;
+  const login = ctx.username.trim();
+  return USERNAME_RE.test(login) ? login : null;
+}
+
+/** Shared `limit` validation for the caller-scoped list tools. */
+function wantedCount(raw: unknown): number | null {
+  if (raw === undefined) return MY_ITEMS_DEFAULT;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > MY_ITEMS_MAX) {
+    return null;
+  }
+  return raw;
+}
+
+/** `2026-09-05T11:22:33Z` -> `2026-09-05`; anything else -> ''. */
+function isoDay(value: unknown): string {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : '';
+}
+
+/**
+ * Joins as many rows as fit under the summary cap, dropping whole rows off
+ * the end instead of letting `ok()` cut the last one mid-URL. A truncated
+ * link is worse than a missing one: the model will cite it anyway, and the
+ * student clicks through to a 404.
+ */
+function fitRows(header: string, rows: string[]): string {
+  const kept: string[] = [];
+  let used = header.length;
+  for (const row of rows) {
+    if (kept.length > 0 && used + row.length + 1 > MAX_SUMMARY_CHARS - 60) break;
+    kept.push(row);
+    used += row.length + 1;
+  }
+  const dropped = rows.length - kept.length;
+  return (
+    `${header}\n${kept.join('\n')}` +
+    (dropped > 0 ? `\n(${dropped} more matched — ask for a smaller number to see them in detail.)` : '')
+  );
+}
+
+/** `https://api.github.com/repos/owner/name` -> `owner/name`; else ''. */
+function repoFromApiUrl(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const m = /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})$/.exec(
+    value,
+  );
+  return m ? m[1] : '';
+}
+
 async function getMyStanding(
   args: Record<string, unknown>,
   ctx: AgentContext,
 ): Promise<ToolResult> {
   if (!isArgsObject(args)) return fail('Invalid arguments: expected an object.');
-  if (!ctx || typeof ctx.username !== 'string' || ctx.username.trim().length === 0) {
+  const login = callerLogin(ctx);
+  if (!login) {
     return fail('Sign in with GitHub to see your standing. Guests cannot use this tool.');
   }
-  const username = ctx.username.trim();
   try {
-    const students = await getStudentsKV();
-    const tracked = students.find((s) => s.github.toLowerCase() === username.toLowerCase());
-    if (!tracked) {
-      const u = sanitizeField(username, 40);
-      return ok(
-        `@${u} is not currently tracked on the leaderboard. Request to be added on /join.`,
+    // The same source the public leaderboard renders from, so this tool can
+    // never quote a number the student cannot also see on their own profile.
+    // It used to return only "you are tracked" plus links, which was strictly
+    // less than the DATA block already carried — a wasted call whenever the
+    // model reached for it.
+    const result = await getStanding(login);
+    if (result.status === 'unavailable') {
+      return fail(
+        'Leaderboard standings are unavailable right now. Say so plainly rather than guessing a rank or a PR count.',
       );
     }
-    const u = sanitizeField(tracked.github, 40);
-    const extra = [
-      tracked.year ? sanitizeField(tracked.year, 20) : '',
-      tracked.campus ? sanitizeField(tracked.campus, 20) : '',
-    ]
-      .filter(Boolean)
-      .join(', ');
+    if (result.status === 'not_tracked') {
+      // The summary cache is rebuilt by scored refreshes, so someone who
+      // joined an hour ago is on the roster but not yet in it. Telling a new
+      // student they are "not on the leaderboard" is the one badly wrong
+      // answer available here, so check the roster before saying it.
+      const students = await getStudentsKV();
+      const tracked = students.find((s) => s.github.toLowerCase() === login.toLowerCase());
+      if (tracked) {
+        const u = sanitizeField(tracked.github, 40);
+        return ok(
+          `@${u} is on the leaderboard roster but has not been scored yet — their stats appear after the next refresh. Profile: /contributors/${u}.`,
+        );
+      }
+      return ok(
+        `@${result.login} is not on the leaderboard roster yet. Request to be added on /join.`,
+      );
+    }
+    const s = result.standing;
+    const who = [s.year, s.campus].filter(Boolean).join(', ');
+    const where = s.unscored
+      ? 'not ranked yet — no merged PRs counted so far, which is a normal starting point and not a bad position'
+      : `ranked ${s.rank} of ${s.rankedOf} scored students, score ${s.score}`;
     return ok(
-      `@${u} is tracked on the leaderboard${extra ? ` (${extra})` : ''}. ` +
-        `Profile: /contributors/${u}. Work checker: /check-work/${u}.`,
+      `@${s.login}${who ? ` (${who})` : ''} is ${where}. ` +
+        `Counted: ${s.mergedPRs} merged PRs, ${s.openPRs} open, ${s.totalPRs} total, ${s.issues} issues. ` +
+        'Only pull requests into repositories they do not own are counted. ' +
+        `Profile: /contributors/${s.login}. Work checker: /check-work/${s.login}.`,
     );
   } catch {
-    return fail('Could not load roster data right now. Try again later.');
+    return fail('Could not load leaderboard data right now. Try again later.');
   }
+}
+
+export interface SearchPRItem {
+  number?: unknown;
+  title?: unknown;
+  html_url?: unknown;
+  repository_url?: unknown;
+  state?: unknown;
+  draft?: unknown;
+  created_at?: unknown;
+  closed_at?: unknown;
+  pull_request?: { merged_at?: unknown } | null;
+}
+
+/**
+ * The caller's own pull requests, most recent first.
+ *
+ * The DATA block already carries their totals. What it cannot carry is the
+ * list — so "what was my last merged PR" had no tool behind it at all, and
+ * the model either refused or burned a turn web-searching a GitHub profile
+ * page, which never works. This is that tool.
+ *
+ * Deliberately NOT `getStudentPRs()` from ./github, which answers a very
+ * similar question. That path runs through `githubSearch`, which calls
+ * `getGitHubHeaders()` and reaches into the shared token pool when the
+ * caller has none of their own — the single thing `callerHeaders` exists to
+ * make impossible. It also pages up to ten times and opts its fetch into a
+ * one-hour revalidate, and "what did I just merge" is precisely the question
+ * being asked here. One live page, on the caller's own token.
+ *
+ * Own-repo PRs are listed but marked. Excluding them (the leaderboard rule)
+ * would answer "you have none" to a student who merged five of them
+ * yesterday; including them unmarked would imply they score. Marking them
+ * answers the question and teaches the rule in the same breath.
+ */
+async function myRecentPRs(args: Record<string, unknown>, ctx: AgentContext): Promise<ToolResult> {
+  if (!isArgsObject(args)) return fail('Invalid arguments: expected {state?, limit?}.');
+  const login = callerLogin(ctx);
+  if (!login) {
+    return fail('Sign in with GitHub to see your own pull requests. Guests cannot use this tool.');
+  }
+
+  const stateRaw = args.state === undefined ? 'all' : args.state;
+  if (typeof stateRaw !== 'string' || !(PR_STATES as readonly string[]).includes(stateRaw)) {
+    return fail(`Invalid state: expected one of ${PR_STATES.join(', ')}.`);
+  }
+  const state = stateRaw as (typeof PR_STATES)[number];
+  const wanted = wantedCount(args.limit);
+  if (wanted === null) {
+    return fail(`Invalid limit: expected an integer between 1 and ${MY_ITEMS_MAX}.`);
+  }
+
+  const qualifier =
+    state === 'merged'
+      ? ' is:merged'
+      : state === 'open'
+        ? ' is:open'
+        : state === 'closed'
+          ? ' is:closed is:unmerged'
+          : '';
+  const q = `is:pr author:${login}${qualifier}`;
+
+  // Sorted by `updated` rather than `created`: merging a PR updates it, so
+  // the most recently merged work is at the top of this page even when it
+  // was opened months ago. The rows are re-sorted below by whichever
+  // timestamp actually matters per row, which `sort=` cannot express.
+  const url =
+    `https://api.github.com/search/issues?q=${encodeURIComponent(q)}` +
+    `&sort=updated&order=desc&per_page=${PR_SEARCH_PER_PAGE}`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: callerHeaders(ctx), signal: AbortSignal.timeout(10000) });
+  } catch {
+    return fail('GitHub did not respond in time. Try again in a moment.');
+  }
+  if (res.status === 403 || res.status === 429) {
+    return fail('GitHub Search rate limit is exhausted right now. Try again in a minute.');
+  }
+  // GitHub answers 422, not an empty result, when `author:` names an account
+  // it cannot resolve. The login here came from the verified session, so this
+  // means the account was renamed or deleted since they signed in.
+  if (res.status === 422) {
+    return fail(
+      `GitHub does not recognise the account @${login} any more — if it was renamed, sign out and back in.`,
+    );
+  }
+  if (!res.ok) return fail(`GitHub Search failed (status ${res.status}). Try again later.`);
+
+  let raw: unknown;
+  try {
+    raw = await res.json();
+  } catch {
+    return fail('GitHub sent a malformed response.');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('GitHub sent an unexpected response.');
+  }
+  const payload = raw as { items?: unknown; total_count?: unknown };
+  const items = Array.isArray(payload.items) ? (payload.items as SearchPRItem[]) : [];
+  const total = typeof payload.total_count === 'number' ? payload.total_count : items.length;
+
+  const adjective = state === 'all' ? '' : state === 'closed' ? 'closed (unmerged) ' : `${state} `;
+  const noun = (n: number) => `${adjective}pull request${n === 1 ? '' : 's'}`;
+  if (items.length === 0) {
+    return ok(
+      state === 'merged'
+        ? `@${login} has no merged pull requests on GitHub yet. Their first merge into someone else’s repository is what puts them on the leaderboard.`
+        : `@${login} has no ${noun(0)} on GitHub right now.`,
+    );
+  }
+
+  const rows = items
+    .map((item) => {
+      const repo = repoFromApiUrl(item.repository_url);
+      const number =
+        typeof item.number === 'number' && Number.isInteger(item.number) && item.number > 0
+          ? item.number
+          : 0;
+      if (!repo || !number) return null;
+      const mergedOn = isoDay(item.pull_request?.merged_at);
+      const closedOn = isoDay(item.closed_at);
+      const openedOn = isoDay(item.created_at);
+      const status = mergedOn
+        ? `merged ${mergedOn}`
+        : item.draft === true
+          ? `draft, opened ${openedOn || 'recently'}`
+          : item.state === 'closed'
+            ? `closed unmerged${closedOn ? ` ${closedOn}` : ''}`
+            : `open since ${openedOn || 'recently'}`;
+      return {
+        sortKey: mergedOn || closedOn || openedOn,
+        repo,
+        number,
+        status,
+        // A PR into a repo the student owns is real work and does not score.
+        own: repo.split('/')[0].toLowerCase() === login.toLowerCase(),
+        title: sanitizeField(item.title, MY_TITLE_CHARS) || '(untitled)',
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null)
+    .sort((a, b) => (a.sortKey < b.sortKey ? 1 : a.sortKey > b.sortKey ? -1 : 0))
+    .slice(0, wanted);
+
+  if (rows.length === 0) return fail('GitHub returned pull requests this tool could not read.');
+
+  const anyOwn = rows.some((r) => r.own);
+  const header =
+    `@${login} — ${rows.length} most recent ${noun(rows.length)}, newest first ` +
+    `(GitHub matched ${total} in total; that count includes their own repositories, so it is not their leaderboard number — use get_my_standing for that).` +
+    (anyOwn
+      ? '\nRows marked "own repo" are pull requests into repositories they own: real work, but not counted on this leaderboard.'
+      : '');
+
+  const lines = rows.map(
+    (r, i) =>
+      `${i + 1}. ${r.status} — ${r.repo}#${r.number}${r.own ? ' [own repo — not counted]' : ''}\n` +
+      `   "${r.title}"\n` +
+      `   https://github.com/${r.repo}/pull/${r.number}`,
+  );
+
+  return ok(fitRows(header, lines));
+}
+
+export interface SearchCommitItem {
+  sha?: unknown;
+  repository?: { full_name?: unknown } | null;
+  commit?: { message?: unknown; author?: { date?: unknown } | null } | null;
+}
+
+/**
+ * The caller's own recent commits.
+ *
+ * This site scores merged pull requests, so nothing in it tracks commits and
+ * no tool could answer "what were my last commits" — the literal question a
+ * student asked, while signed in, holding a verified login and their own
+ * token. The agent web-searched their profile page instead, then told them to
+ * go look at GitHub themselves.
+ *
+ * NOT the events feed, which is the obvious way to do this and no longer
+ * works: GitHub has stopped putting `commits` and `size` in a PushEvent
+ * payload. What comes back now is `{before, head, push_id, ref,
+ * repository_id}` — enough to know a push happened, not what was in it.
+ * Checked live against several accounts in September 2026; every PushEvent
+ * carried `commits: []`.
+ *
+ * The commit search index answers it properly in one call, sorted by author
+ * date so "most recent" means what the student means by it. It reaches only
+ * what the caller's token can see, and the login is always the verified
+ * session's, so a student sees their own work and can never ask after
+ * anyone else's.
+ */
+async function myRecentCommits(
+  args: Record<string, unknown>,
+  ctx: AgentContext,
+): Promise<ToolResult> {
+  if (!isArgsObject(args)) return fail('Invalid arguments: expected {limit?}.');
+  const login = callerLogin(ctx);
+  if (!login) {
+    return fail('Sign in with GitHub to see your own commits. Guests cannot use this tool.');
+  }
+  const wanted = wantedCount(args.limit);
+  if (wanted === null) {
+    return fail(`Invalid limit: expected an integer between 1 and ${MY_ITEMS_MAX}.`);
+  }
+
+  const url =
+    `https://api.github.com/search/commits?q=${encodeURIComponent(`author:${login}`)}` +
+    `&sort=author-date&order=desc&per_page=${wanted}`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: callerHeaders(ctx), signal: AbortSignal.timeout(10000) });
+  } catch {
+    return fail('GitHub did not respond in time. Try again in a moment.');
+  }
+  if (res.status === 403 || res.status === 429) {
+    return fail('GitHub Search rate limit is exhausted right now. Try again in a minute.');
+  }
+  if (res.status === 422) {
+    return fail(`GitHub cannot search commits for @${login} — the account may have been renamed.`);
+  }
+  if (!res.ok) return fail(`GitHub Search failed (status ${res.status}). Try again later.`);
+
+  let raw: unknown;
+  try {
+    raw = await res.json();
+  } catch {
+    return fail('GitHub sent a malformed response.');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fail('GitHub sent an unexpected response.');
+  }
+  const payload = raw as { items?: unknown; total_count?: unknown };
+  const items = Array.isArray(payload.items) ? (payload.items as SearchCommitItem[]) : [];
+  const total = typeof payload.total_count === 'number' ? payload.total_count : items.length;
+
+  const rows = items
+    .map((item) => {
+      const repo = typeof item.repository?.full_name === 'string' ? item.repository.full_name : '';
+      const sha = typeof item.sha === 'string' ? item.sha : '';
+      if (!REPO_RE.test(repo) || !/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+      const first =
+        typeof item.commit?.message === 'string' ? item.commit.message.split('\n')[0] : '';
+      const message = sanitizeField(first, MY_COMMIT_CHARS);
+      if (!message) return null;
+      // The date carries the author's own UTC offset, so slicing it gives the
+      // day it was their Tuesday — which is the day they will remember.
+      return { when: isoDay(item.commit?.author?.date), repo, sha: sha.slice(0, 7), message };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+
+  if (rows.length === 0) {
+    return ok(
+      `GitHub's commit search has nothing indexed for @${login}. It only reaches repositories the signed-in account can see, so commits in private repositories may not appear. Merged pull requests are what this leaderboard scores, so those are the better thing to look at.`,
+    );
+  }
+
+  const header =
+    `@${login} — ${rows.length} most recent commit${rows.length > 1 ? 's' : ''}, newest first ` +
+    `(GitHub has ${total} indexed for this author). ` +
+    'Commits are not what this leaderboard scores — merged pull requests are.';
+  const lines = rows.map(
+    (r, i) =>
+      `${i + 1}. ${r.when || 'recently'} — ${r.repo} ${r.sha}\n` +
+      `   "${r.message}"\n` +
+      `   https://github.com/${r.repo}/commit/${r.sha}`,
+  );
+  return ok(fitRows(header, lines));
 }
 
 async function explainFlag(args: Record<string, unknown>): Promise<ToolResult> {
@@ -741,6 +1103,53 @@ export const TOOLS: ToolDef[] = [
     needsLogin: true,
     costsSearch: false,
     run: (args, ctx) => getMyStanding(args, ctx),
+  },
+  {
+    name: 'my_recent_prs',
+    description:
+      "List the signed-in caller's own pull requests, newest first, with each one's state, repository, title and link. Use this for any question about their own contributions — \"my last PR\", \"what did I get merged\", \"what am I waiting on\" — and never try to web_search a person's GitHub activity, which does not work. Optional state filter (merged, open, closed, all) and limit. Requires login; it only ever reports on the caller.",
+    parameters: {
+      type: 'object',
+      properties: {
+        state: {
+          type: 'string',
+          enum: [...PR_STATES],
+          description: 'Which pull requests to list. Defaults to all.',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: MY_ITEMS_MAX,
+          description: `How many to list, 1-${MY_ITEMS_MAX}. Defaults to ${MY_ITEMS_DEFAULT}.`,
+        },
+      },
+      additionalProperties: false,
+    },
+    needsLogin: true,
+    costsSearch: true,
+    untrusted: true, // PR titles are free text, and half of them are not the caller's repos
+    run: (args, ctx) => myRecentPRs(args, ctx),
+  },
+  {
+    name: 'my_recent_commits',
+    description:
+      "List the signed-in caller's most recent commits — date, repository, short SHA, message and link — newest first. Use this when they ask about their commits or recent coding activity rather than their pull requests. Requires login; it only ever reports on the caller.",
+    parameters: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: MY_ITEMS_MAX,
+          description: `How many commits to list, 1-${MY_ITEMS_MAX}. Defaults to ${MY_ITEMS_DEFAULT}.`,
+        },
+      },
+      additionalProperties: false,
+    },
+    needsLogin: true,
+    costsSearch: true,
+    untrusted: true, // commit messages are free text, from repos anyone can own
+    run: (args, ctx) => myRecentCommits(args, ctx),
   },
   {
     name: 'explain_flag',

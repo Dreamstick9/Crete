@@ -468,3 +468,151 @@ describe('runAgent — batchSize', () => {
     expect(seen).toEqual([1]);
   });
 });
+
+/**
+ * The gap this closes, at the level the student experiences it.
+ *
+ * A real session: signed in, the student asked "what were my last commits".
+ * The agent had no tool that could answer, so it web-searched
+ * `site:github.com/<user>/commits`, read the page, and then told them to go
+ * check GitHub themselves — while holding their verified login and their
+ * OAuth token. These tests run the real registry so the wiring, not a stub,
+ * is what is under test.
+ */
+describe('runAgent — the caller’s own work', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  /** Stubs api.github.com only; the provider has its own fetchImpl. */
+  function stubGitHub(body: unknown) {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch;
+  }
+
+  it('offers the my_* tools to a signed-in student and to no guest', async () => {
+    const { fetchImpl, requests } = makeProvider([textResponse('hi')]);
+    await runAgent(
+      { messages: [{ role: 'user', content: 'hi' }], username: 'octocat', requestId: 'r' },
+      { fetchImpl, contextBlock: CONTEXT },
+    );
+    const named = (r: ProviderRequest) =>
+      ((r.body.tools as Array<{ function: { name: string } }>) ?? []).map((t) => t.function.name);
+    expect(named(requests[0])).toEqual(expect.arrayContaining(['my_recent_prs', 'my_recent_commits']));
+
+    const guest = makeProvider([textResponse('hi')]);
+    await runAgent(
+      { messages: [{ role: 'user', content: 'hi' }], username: null, requestId: 'r' },
+      { fetchImpl: guest.fetchImpl, contextBlock: CONTEXT },
+    );
+    expect(named(guest.requests[0])).not.toContain('my_recent_prs');
+    expect(named(guest.requests[0])).not.toContain('my_recent_commits');
+  });
+
+  it('tells the model to use them instead of web-searching a profile page', async () => {
+    const { fetchImpl, requests } = makeProvider([textResponse('hi')]);
+    await runAgent(
+      { messages: [{ role: 'user', content: 'hi' }], username: 'octocat', requestId: 'r' },
+      { fetchImpl, contextBlock: CONTEXT },
+    );
+    const system = String(requests[0].messages[0].content);
+    expect(system).toContain('my_recent_commits');
+    expect(system).toMatch(/Never web_search a person’s GitHub activity/);
+  });
+
+  it('answers "what was my last merged PR" end to end', async () => {
+    stubGitHub({
+      total_count: 12,
+      items: [
+        {
+          number: 55,
+          title: 'Read the issue before asking the codebase about it',
+          repository_url: 'https://api.github.com/repos/nst-sdc/Open-Source-Tracker-NST',
+          state: 'closed',
+          created_at: '2026-08-01T00:00:00Z',
+          closed_at: '2026-09-01T00:00:00Z',
+          pull_request: { merged_at: '2026-09-01T00:00:00Z' },
+        },
+      ],
+    });
+    const { fetchImpl, requests } = makeProvider([
+      toolCallResponse([{ name: 'my_recent_prs', args: { state: 'merged', limit: 1 } }]),
+      textResponse('Your last merged PR was #55.'),
+    ]);
+    const result = await runAgent(
+      {
+        messages: [{ role: 'user', content: 'what was my last merged pr' }],
+        username: 'octocat',
+        token: 'gho_caller',
+        requestId: 'r',
+      },
+      { fetchImpl, contextBlock: CONTEXT },
+    );
+
+    expect(result.toolsUsed).toEqual(['my_recent_prs']);
+    expect(result.reply).toContain('#55');
+
+    // The tool result reached the model as quarantined data, tags intact.
+    const toolMessage = requests[1].messages.find((m) => m.role === 'tool');
+    const content = String(toolMessage?.content);
+    expect(content).toContain('<retrieved_data>');
+    expect(content).toContain('</retrieved_data>');
+    expect(content).toContain('merged 2026-09-01');
+    expect(content).toContain('Open-Source-Tracker-NST#55');
+  });
+
+  it('runs my_recent_commits through the real registry too', async () => {
+    stubGitHub({
+      total_count: 699,
+      items: [
+        {
+          sha: '68ed42f0000000000000000000000000000000aa',
+          repository: { full_name: 'nst-sdc/Open-Source-Tracker-NST' },
+          commit: {
+            message: 'Reject dot-only segments in a repository name',
+            author: { date: '2026-09-05T11:48:48.000+05:30' },
+          },
+        },
+      ],
+    });
+    const { fetchImpl, requests } = makeProvider([
+      toolCallResponse([{ name: 'my_recent_commits', args: { limit: 3 } }]),
+      textResponse('Here they are.'),
+    ]);
+    const result = await runAgent(
+      {
+        messages: [{ role: 'user', content: 'what were my last commits' }],
+        username: 'octocat',
+        token: 'gho_caller',
+        requestId: 'r',
+      },
+      { fetchImpl, contextBlock: CONTEXT },
+    );
+    expect(result.toolsUsed).toEqual(['my_recent_commits']);
+    const content = String(requests[1].messages.find((m) => m.role === 'tool')?.content);
+    expect(content).toContain('Reject dot-only segments in a repository name');
+    expect(content).toContain('2026-09-05 — nst-sdc/Open-Source-Tracker-NST 68ed42f');
+  });
+
+  it('never lets a guest reach a my_* tool, even if the model asks', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('a guest must not reach GitHub through these tools');
+    }) as unknown as typeof fetch;
+    const { fetchImpl, requests } = makeProvider([
+      toolCallResponse([{ name: 'my_recent_prs', args: {} }]),
+      textResponse('Sign in first.'),
+    ]);
+    const result = await runAgent(
+      { messages: [{ role: 'user', content: 'my prs?' }], username: null, requestId: 'r' },
+      { fetchImpl, contextBlock: CONTEXT },
+    );
+    expect(result.reply).toBe('Sign in first.');
+    expect(String(requests[1].messages.find((m) => m.role === 'tool')?.content)).toMatch(
+      /Requires sign-in/,
+    );
+  });
+});
